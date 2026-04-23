@@ -20,7 +20,12 @@ async-trait.workspace = true
 reqwest.workspace = true
 arrow.workspace = true
 parquet.workspace = true
+bytes.workspace = true
+futures.workspace = true
+directories = "5"
+tempfile = "3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
+wiremock = "0.6"

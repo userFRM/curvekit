@@ -1,25 +1,57 @@
-//! `curvekit` — offline-first bundled-parquet risk-free rate library.
+//! `curvekit` — risk-free rate library: Treasury yield curves + SOFR.
 //!
-//! Parquet files ship inside the repo under `data/` and are read at runtime
-//! without any network calls. The nightly GitHub Actions workflow appends
-//! yesterday's Treasury curve and today's SOFR to the current-year file.
+//! # Two usage modes
+//!
+//! ## 1. Async client (recommended for applications)
+//!
+//! [`Curvekit`] fetches parquet files from GitHub raw on demand, caches them
+//! locally with ETag revalidation, and falls back to stale cache on network
+//! errors.
+//!
+//! ```no_run
+//! use curvekit::Curvekit;
+//! use chrono::NaiveDate;
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     let client = Curvekit::new()?;
+//!     let curve = client.treasury_latest().await?;
+//!     let sofr  = client.sofr_latest().await?;
+//!     println!("{} — 10Y: {:.4}%  SOFR: {:.4}%",
+//!              curve.date,
+//!              curve.get(3650).unwrap_or(0.0) * 100.0,
+//!              sofr.rate * 100.0);
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## 2. Offline bundled reader (for CLI / data-pipeline tools)
+//!
+//! [`sources::bundled`] reads from local parquet files populated by
+//! `curvekit-cli backfill`. No network calls; returns
+//! `CurvekitError::DateNotFound` if the file is absent.
 //!
 //! # Modules
 //!
-//! - [`curve`] — [`YieldCurve`], [`SofrRate`], [`TermStructure`], [`YieldCurveDay`], [`SofrDay`].
-//! - [`sources::bundled`] — parquet reader API (offline-first, no network).
-//! - [`sources::parquet_io`] — parquet writer API (used by CLI backfill/append).
-//! - [`sources::treasury`] — US Treasury CSV fetcher (used by CLI, not by lib consumers).
-//! - [`sources::sofr`] — NY Fed SOFR CSV fetcher (used by CLI, not by lib consumers).
-//! - [`interpolation`] — linear and monotone cubic-spline interpolation.
+//! - [`client`] — [`Curvekit`] async client with GitHub raw backend.
+//! - [`fetcher`] — ETag-aware [`CachedFetcher`] internals (pub(crate)).
+//! - [`curve`] — [`YieldCurve`], [`SofrRate`], [`TermStructure`], etc.
+//! - [`sources::bundled`] — offline parquet reader.
+//! - [`sources::parquet_io`] — parquet writer (used by CLI).
+//! - [`sources::treasury`] — US Treasury CSV fetcher (used by CLI).
+//! - [`sources::sofr`] — NY Fed SOFR CSV fetcher (used by CLI).
+//! - [`interpolation`] — linear interpolation.
 //! - [`error`] — typed error enums.
 
+pub mod client;
 pub mod curve;
 pub mod error;
+pub(crate) mod fetcher;
 pub mod interpolation;
 pub mod sources;
 
-// Top-level re-exports: the reader API is the primary public surface.
+// Top-level re-exports.
+pub use client::Curvekit;
 pub use curve::{SofrDay, SofrRate, Tenor, TermStructure, YieldCurve, YieldCurveDay};
 pub use error::{CurvekitError, Result};
 pub use sources::bundled::{

@@ -176,12 +176,15 @@ async fn cmd_backfill(
     // Multi-year mode.
     let n = years.unwrap_or(25) as i32;
 
+    let mut had_error = false;
+
     match source {
         Some("treasury") => {
             let start_year = (current_year - n + 1).max(2000);
             for y in start_year..=current_year {
                 if let Err(e) = fetch_treasury_year(data_dir, y).await {
-                    tracing::warn!("treasury {y}: {e}");
+                    tracing::error!(source = "treasury", year = y, error = %e, "fetch failed");
+                    had_error = true;
                 }
             }
         }
@@ -189,7 +192,8 @@ async fn cmd_backfill(
             let start_year = (current_year - n + 1).max(2018);
             for y in start_year..=current_year {
                 if let Err(e) = fetch_sofr_year(data_dir, y).await {
-                    tracing::warn!("sofr {y}: {e}");
+                    tracing::error!(source = "sofr", year = y, error = %e, "fetch failed");
+                    had_error = true;
                 }
             }
         }
@@ -198,19 +202,24 @@ async fn cmd_backfill(
             let t_start = (current_year - n + 1).max(2000);
             for y in t_start..=current_year {
                 if let Err(e) = fetch_treasury_year(data_dir, y).await {
-                    tracing::warn!("treasury {y}: {e}");
+                    tracing::error!(source = "treasury", year = y, error = %e, "fetch failed");
+                    had_error = true;
                 }
             }
             let s_start = (current_year - n + 1).max(2018);
             for y in s_start..=current_year {
                 if let Err(e) = fetch_sofr_year(data_dir, y).await {
-                    tracing::warn!("sofr {y}: {e}");
+                    tracing::error!(source = "sofr", year = y, error = %e, "fetch failed");
+                    had_error = true;
                 }
             }
         }
         Some(other) => bail!("unknown source '{other}' — use 'treasury' or 'sofr'"),
     }
 
+    if had_error {
+        bail!("backfill completed with one or more fetch errors (see above)");
+    }
     println!("Backfill complete. Data written to {}", data_dir.display());
     Ok(())
 }
@@ -225,12 +234,14 @@ async fn fetch_treasury_year(data_dir: &std::path::Path, year: i32) -> Result<()
         .await
         .with_context(|| format!("treasury fetch for {year}"))?;
     if curves.is_empty() {
-        tracing::warn!("treasury {year}: no data returned");
+        // Not an error — could be a year with no published data yet (e.g. current partial year
+        // with no trading days yet fetched). Log and skip silently so the caller can decide.
+        tracing::warn!("treasury {year}: upstream returned 0 rows — skipping write");
         return Ok(());
     }
-    tracing::info!("treasury {year}: {} curves", curves.len());
     write_treasury_year(data_dir, year, &curves)
         .with_context(|| format!("writing treasury {year}"))?;
+    tracing::info!("wrote treasury-{year}.parquet: {} rows", curves.len());
     Ok(())
 }
 
@@ -244,10 +255,10 @@ async fn fetch_sofr_year(data_dir: &std::path::Path, year: i32) -> Result<()> {
         .await
         .with_context(|| format!("sofr fetch for {year}"))?;
     if rates.is_empty() {
-        tracing::warn!("sofr {year}: no data returned");
+        tracing::warn!("sofr {year}: upstream returned 0 rows — skipping write");
         return Ok(());
     }
-    tracing::info!("sofr {year}: {} rates", rates.len());
+    let n = rates.len();
     let days: Vec<SofrDay> = rates
         .into_iter()
         .map(|r| SofrDay {
@@ -256,6 +267,7 @@ async fn fetch_sofr_year(data_dir: &std::path::Path, year: i32) -> Result<()> {
         })
         .collect();
     write_sofr_year(data_dir, year, &days).with_context(|| format!("writing sofr {year}"))?;
+    tracing::info!("wrote sofr-{year}.parquet: {n} rows");
     Ok(())
 }
 

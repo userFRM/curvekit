@@ -38,6 +38,8 @@ async-trait = "0.1"
 
 # ── HTTP ──
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+bytes = "1"
+futures = "0.3"
 
 # ── Parquet / Arrow ──
 arrow = { version = "54", default-features = false, features = ["csv"] }

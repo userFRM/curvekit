@@ -171,15 +171,22 @@ impl HttpTreasuryFetcher {
     pub fn new() -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .user_agent("curvekit/0.1 (github.com/userFRM/curvekit)")
+            // Akamai CDN on home.treasury.gov blocks the default reqwest UA.
+            // An identifying UA is also good practice for government data sources.
+            .user_agent("curvekit/0.1 (+https://github.com/userFRM/curvekit)")
             .build()?;
         Ok(Self { client })
     }
 
+    /// Build the URL for a single calendar year.
+    ///
+    /// Uses the `/{year}/all` path segment — the `all/all` variant returns 403
+    /// from Akamai CDN regardless of headers; the year-specific path routes to
+    /// the Drupal backend directly and returns CSV.
     fn url_for_year(year: i32) -> String {
         format!(
             "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/\
-             daily-treasury-rates.csv/all/all\
+             daily-treasury-rates.csv/{year}/all\
              ?type=daily_treasury_yield_curve\
              &field_tdr_date_value={year}\
              &page&_format=csv"
