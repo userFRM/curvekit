@@ -1,0 +1,183 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "curvekit",
+    "version": "0.1.0",
+    "description": "Risk-free rate service: US Treasury yield curve + SOFR"
+  },
+  "servers": [{ "url": "http://localhost:8080" }],
+  "paths": {
+    "/rpc": {
+      "post": {
+        "summary": "JSON-RPC 2.0 endpoint",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RpcRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON-RPC response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RpcResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/treasury/curve/{date}": {
+      "get": {
+        "summary": "Treasury yield curve for a specific date",
+        "parameters": [
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "example": "2026-04-15" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Yield curve",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/YieldCurve" }
+              }
+            }
+          },
+          "404": { "description": "No data for this date" }
+        }
+      }
+    },
+    "/treasury/range": {
+      "get": {
+        "summary": "Treasury yield curves for a date range",
+        "parameters": [
+          {
+            "name": "start",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "example": "2026-04-01" }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "example": "2026-04-15" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Array of yield curves",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/YieldCurve" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sofr/{date}": {
+      "get": {
+        "summary": "SOFR rate for a specific date",
+        "parameters": [
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "example": "2026-04-15" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SOFR rate",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SofrRate" }
+              }
+            }
+          },
+          "404": { "description": "No data for this date" }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Service health and cache statistics",
+        "responses": {
+          "200": {
+            "description": "Health response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthResponse" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "YieldCurve": {
+        "type": "object",
+        "properties": {
+          "date": { "type": "string", "example": "2026-04-15" },
+          "points": {
+            "type": "object",
+            "additionalProperties": { "type": "number" },
+            "example": { "365": 0.04, "3650": 0.05 }
+          }
+        }
+      },
+      "SofrRate": {
+        "type": "object",
+        "properties": {
+          "date": { "type": "string", "example": "2026-04-15" },
+          "rate": { "type": "number", "example": 0.04237 }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "example": "ok" },
+          "treasury_rows": { "type": "integer" },
+          "sofr_rows": { "type": "integer" }
+        }
+      },
+      "RpcRequest": {
+        "type": "object",
+        "properties": {
+          "jsonrpc": { "type": "string", "example": "2.0" },
+          "id": { "type": "integer", "example": 1 },
+          "method": { "type": "string", "example": "rates.treasury_curve" },
+          "params": { "type": "object" }
+        }
+      },
+      "RpcResponse": {
+        "type": "object",
+        "properties": {
+          "jsonrpc": { "type": "string" },
+          "id": { "type": "integer" },
+          "result": {},
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": { "type": "integer" },
+              "message": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

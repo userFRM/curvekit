@@ -1,0 +1,28 @@
+[package]
+name = "curvekit-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "curvekit rate server — JSON-RPC + REST service for Treasury + SOFR data"
+keywords = ["treasury", "sofr", "server", "finance"]
+categories = ["command-line-utilities", "finance"]
+
+[[bin]]
+name = "curvekit-server"
+path = "src/main.rs"
+
+[dependencies]
+curvekit-core = { path = "../curvekit-core" }
+curvekit-rpc  = { path = "../curvekit-rpc"  }
+
+anyhow.workspace = true
+tokio.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+clap.workspace = true
+axum.workspace = true
