@@ -2,15 +2,12 @@
 resolver = "2"
 
 members = [
-    "crates/curvekit-core",
-    "crates/curvekit-rpc",
-    "crates/curvekit-server",
-    "sdks/rust",
+    "crates/curvekit",
     "cli",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Theta Gamma Systems"]
 license = "Apache-2.0"
@@ -35,7 +32,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # ── Time ──
 chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10"
 
 # ── Async utilities ──
 async-trait = "0.1"
@@ -43,13 +39,9 @@ async-trait = "0.1"
 # ── HTTP ──
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
-# ── Database ──
-rusqlite = { version = "0.32", features = ["bundled"] }
-
-# ── Web framework ──
-axum = { version = "0.8", features = ["macros"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+# ── Parquet / Arrow ──
+arrow = { version = "54", default-features = false, features = ["csv"] }
+parquet = { version = "54", default-features = false, features = ["snap", "zstd", "arrow"] }
 
 # ── CLI ──
 clap = { version = "4", features = ["derive", "env"] }

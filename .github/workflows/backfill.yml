@@ -1,0 +1,28 @@
+name: backfill
+on:
+  workflow_dispatch:
+    inputs:
+      start_year:
+        description: "First year to backfill (default 2000 for treasury, 2018 for SOFR)"
+        required: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --bin curvekit-cli
+      - name: Backfill
+        run: ./target/release/curvekit-cli backfill --years 25
+      - name: Commit data
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          git add data/
+          git diff --cached --quiet || git commit -m "chore(data): backfill via workflow_dispatch"
+          git push

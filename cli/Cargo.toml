@@ -1,26 +1,23 @@
 [package]
-name = "curvekit"
+name = "curvekit-cli"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CLI for the curvekit risk-free rate service"
-keywords = ["treasury", "sofr", "cli", "finance"]
+description = "CLI for curvekit — Treasury + SOFR parquet backfill and inspection"
+keywords = ["treasury", "sofr", "cli", "finance", "parquet"]
 categories = ["command-line-utilities", "finance"]
 
 [[bin]]
-name = "curvekit"
+name = "curvekit-cli"
 path = "src/main.rs"
 
 [dependencies]
-curvekit-core = { path = "../crates/curvekit-core" }
-curvekit-sdk  = { path = "../sdks/rust"            }
+curvekit = { path = "../crates/curvekit" }
 
 anyhow.workspace = true
 tokio.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 chrono.workspace = true
 clap.workspace = true
 tracing.workspace = true

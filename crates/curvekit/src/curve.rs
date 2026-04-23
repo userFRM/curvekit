@@ -1,6 +1,6 @@
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::interpolation;
 
@@ -102,6 +102,16 @@ impl YieldCurve {
     pub fn is_empty(&self) -> bool {
         self.points.is_empty()
     }
+
+    /// Return a `HashMap<days, continuous_rate>` suitable for Kairos's
+    /// `kairos_common::rates::FullRates::continuous_curve`.
+    ///
+    /// The rates stored in `points` are already continuously compounded
+    /// (converted from BEY during CSV parse / parquet read), so this is
+    /// a simple copy into the HashMap type Kairos expects.
+    pub fn to_continuous_map(&self) -> HashMap<u32, f64> {
+        self.points.iter().map(|(&k, &v)| (k, v)).collect()
+    }
 }
 
 /// A single SOFR observation.
@@ -195,4 +205,31 @@ mod tests {
         let r365 = ts.rate_for_days(365).unwrap();
         assert!((r365 - 0.04).abs() < 1e-12);
     }
+
+    #[test]
+    fn to_continuous_map_roundtrip() {
+        let d = date();
+        let mut c = YieldCurve::new(d);
+        c.insert(365, 0.042);
+        c.insert(3650, 0.048);
+        let map = c.to_continuous_map();
+        assert_eq!(map.len(), 2);
+        assert!((map[&365] - 0.042).abs() < 1e-12);
+        assert!((map[&3650] - 0.048).abs() < 1e-12);
+    }
+}
+
+// ── Bulk types used by the parquet writer API ─────────────────────────────────
+
+/// One day of Treasury curve data: a full [`YieldCurve`].
+///
+/// This is a type alias used by the bulk writer API for clarity.
+pub type YieldCurveDay = YieldCurve;
+
+/// One SOFR day record — used by the parquet writer API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SofrDay {
+    pub date: NaiveDate,
+    /// Continuously-compounded overnight rate.
+    pub rate: f64,
 }

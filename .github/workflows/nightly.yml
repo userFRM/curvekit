@@ -1,0 +1,29 @@
+name: nightly
+on:
+  schedule:
+    # 03:00 UTC Mon-Fri = 11pm/10pm ET (post-close, after Treasury ~15:30 ET + SOFR ~08:00 ET next day)
+    - cron: "0 3 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  append:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --bin curvekit-cli
+      - name: Append today
+        run: ./target/release/curvekit-cli append-today
+      - name: Commit if changed
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          git add data/
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(data): nightly $(date -u +%Y-%m-%d)"
+            git push
+          fi

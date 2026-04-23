@@ -1,139 +1,54 @@
 # API Reference
 
-The curvekit server exposes two equivalent interfaces on port 8080:
+curvekit is a library — there is no HTTP server or RPC interface.
+Consumers link against the `curvekit` crate and call synchronous functions.
 
-- **JSON-RPC 2.0** at `POST /rpc` — structured, batch-capable.
-- **REST** at `GET /treasury/...`, `GET /sofr/...`, `GET /health` — `curl`-friendly.
+## Reader API (`curvekit::`)
 
-An OpenAPI 3.0 spec is available at `GET /openapi.json`.
+```rust
+/// Full Treasury yield curve for a date from bundled parquet.
+pub fn treasury_curve(date: NaiveDate) -> Result<YieldCurve>;
 
-## JSON-RPC
+/// SOFR overnight rate for a date (continuously compounded).
+pub fn sofr(date: NaiveDate) -> Result<f64>;
 
-All calls are `POST /rpc` with `Content-Type: application/json`.
+/// Interpolated continuously-compounded rate at arbitrary tenor.
+pub fn rate_for_days(date: NaiveDate, days: u32) -> Result<f64>;
 
-### `rates.treasury_curve`
+/// Latest date for which Treasury data is bundled.
+pub fn treasury_latest_date() -> NaiveDate;
 
-Fetch the Treasury yield curve for a single date.
-
-```json
-{
-  "jsonrpc": "2.0", "id": 1,
-  "method": "rates.treasury_curve",
-  "params": { "date": "2026-04-15" }
-}
+/// Latest date for which SOFR data is bundled.
+pub fn sofr_latest_date() -> NaiveDate;
 ```
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0", "id": 1,
-  "result": {
-    "date": "2026-04-15",
-    "points": {
-      "30":    0.04187,
-      "60":    0.04163,
-      "91":    0.04115,
-      "182":   0.04041,
-      "365":   0.03957,
-      "730":   0.03912,
-      "1095":  0.03867,
-      "1825":  0.03823,
-      "2555":  0.03780,
-      "3650":  0.03739,
-      "7300":  0.03960,
-      "10950": 0.03912
-    }
-  }
-}
+## Writer API (`curvekit::sources::parquet_io::`)
+
+Used by the CLI. Consumers that only read data do not need this.
+
+```rust
+/// Write one year of Treasury curves to data_dir/treasury-{year}.parquet.
+pub fn write_treasury_year(data_dir: &Path, year: i32, curves: &[YieldCurveDay]) -> Result<()>;
+
+/// Write one year of SOFR rates to data_dir/sofr-{year}.parquet.
+pub fn write_sofr_year(data_dir: &Path, year: i32, rates: &[SofrDay]) -> Result<()>;
+
+/// Append one day's Treasury curve (reads existing file, merges, rewrites).
+pub fn append_treasury_day(data_dir: &Path, date: NaiveDate, curve: &YieldCurve) -> Result<()>;
+
+/// Append one day's SOFR rate.
+pub fn append_sofr_day(data_dir: &Path, date: NaiveDate, rate: f64) -> Result<()>;
 ```
 
-Keys are **days to maturity** (integers). Values are **continuously compounded**
-rates (not percentages).
+## CLI (`curvekit-cli`)
 
-### `rates.sofr`
-
-Fetch the SOFR overnight rate for a single date.
-
-```json
-{
-  "jsonrpc": "2.0", "id": 1,
-  "method": "rates.sofr",
-  "params": { "date": "2026-04-15" }
-}
+```
+curvekit-cli backfill --years 25
+curvekit-cli backfill --source treasury --year 2024
+curvekit-cli append-today
+curvekit-cli get treasury --date 2026-04-14
+curvekit-cli get sofr --date 2026-04-14
 ```
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0", "id": 1,
-  "result": { "date": "2026-04-15", "rate": 0.042371 }
-}
-```
-
-### `rates.treasury_range`
-
-Fetch Treasury curves for a date range (returns all cached dates in the range).
-
-```json
-{
-  "jsonrpc": "2.0", "id": 1,
-  "method": "rates.treasury_range",
-  "params": { "start": "2026-04-01", "end": "2026-04-15" }
-}
-```
-
-**Response:** array of `YieldCurve` objects.
-
-### `rates.health`
-
-Service health and cache statistics.
-
-```json
-{ "jsonrpc": "2.0", "id": 1, "method": "rates.health", "params": {} }
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0", "id": 1,
-  "result": { "status": "ok", "treasury_rows": 240, "sofr_rows": 20 }
-}
-```
-
-## REST
-
-### `GET /treasury/curve/:date`
-
-```bash
-curl http://localhost:8080/treasury/curve/2026-04-15 | jq
-```
-
-Returns a `YieldCurve` JSON object. 404 if the date is not in cache.
-
-### `GET /treasury/range?start=YYYY-MM-DD&end=YYYY-MM-DD`
-
-```bash
-curl "http://localhost:8080/treasury/range?start=2026-04-01&end=2026-04-15" | jq
-```
-
-Returns an array of `YieldCurve` objects.
-
-### `GET /sofr/:date`
-
-```bash
-curl http://localhost:8080/sofr/2026-04-15 | jq
-```
-
-Returns a `SofrRate` JSON object. 404 if not in cache.
-
-### `GET /health`
-
-```bash
-curl http://localhost:8080/health | jq
-```
-
-Returns `{ status, treasury_rows, sofr_rows }`.
-
-### `GET /openapi.json`
-
-Machine-readable OpenAPI 3.0 specification.
+The `--data-dir` flag (or `$CURVEKIT_DATA_DIR` env var) overrides the default
+`<repo-root>/data/` directory.

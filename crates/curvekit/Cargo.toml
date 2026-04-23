@@ -1,12 +1,12 @@
 [package]
-name = "curvekit-core"
+name = "curvekit"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Risk-free rate fetchers, parsers, curve types, interpolation, and SQLite cache"
-keywords = ["treasury", "sofr", "yield-curve", "rates", "finance"]
+description = "Offline-first bundled-parquet risk-free rate library — Treasury yield curves + SOFR"
+keywords = ["treasury", "sofr", "yield-curve", "rates", "parquet"]
 categories = ["finance", "api-bindings"]
 
 [dependencies]
@@ -14,13 +14,13 @@ anyhow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 tracing.workspace = true
 chrono.workspace = true
-chrono-tz.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
-rusqlite.workspace = true
+arrow.workspace = true
+parquet.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"
