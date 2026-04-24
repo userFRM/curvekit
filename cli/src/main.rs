@@ -1,27 +1,37 @@
-//! `curvekit-cli` — backfill, append, and inspect bundled parquet data.
+//! `curvekit-cli` — backfill, append, inspect bundled parquet data, and
+//! generate SHA-256 manifests.
 //!
 //! # Commands
 //!
 //! ```text
 //! curvekit-cli backfill --years 25
 //! curvekit-cli backfill --source treasury --year 2024
+//! curvekit-cli backfill --source effr --year 2024
+//! curvekit-cli backfill --source obfr --year 2024
 //! curvekit-cli append-today
 //! curvekit-cli get treasury --date 2026-04-14
 //! curvekit-cli get sofr --date 2026-04-14
+//! curvekit-cli manifest
 //! ```
 
 use anyhow::{bail, Context, Result};
 use chrono::{Datelike, NaiveDate, Utc};
 use clap::{Parser, Subcommand};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use curvekit::curve::SofrDay;
+use curvekit::sources::effr::{EffrDay, HttpEffrFetcher};
+use curvekit::sources::obfr::{HttpObfrFetcher, ObfrDay};
 use curvekit::sources::parquet_io::{
-    append_sofr_day, append_treasury_day, write_sofr_year, write_treasury_year,
+    append_effr_day, append_obfr_day, append_sofr_day, append_treasury_day, write_effr_year,
+    write_obfr_year, write_sofr_year, write_treasury_year,
 };
 use curvekit::sources::sofr::HttpSofrFetcher;
 use curvekit::sources::treasury::HttpTreasuryFetcher;
+use curvekit::EffrFetcher;
+use curvekit::ObfrFetcher;
 use curvekit::SofrFetcher;
 use curvekit::Tenor;
 use curvekit::TreasuryFetcher;
@@ -31,7 +41,7 @@ use curvekit::TreasuryFetcher;
 #[derive(Parser, Debug)]
 #[command(
     name = "curvekit-cli",
-    about = "Manage curvekit bundled-parquet data — Treasury yield curves + SOFR",
+    about = "Manage curvekit bundled-parquet data — Treasury + SOFR + EFFR + OBFR",
     version,
     propagate_version = true
 )]
@@ -49,13 +59,14 @@ struct Cli {
 enum Command {
     /// Backfill historical data from public sources.
     ///
-    /// With no options, fetches treasury 2000-present + SOFR 2018-present.
+    /// With no options, fetches treasury 2000-present + SOFR 2018-present
+    /// + EFFR 2000-present + OBFR 2016-present.
     Backfill {
         /// Number of years back from current year (overrides --year).
         #[arg(long)]
         years: Option<u32>,
 
-        /// Restrict to one source: "treasury" or "sofr".
+        /// Restrict to one source: "treasury", "sofr", "effr", "obfr".
         #[arg(long)]
         source: Option<String>,
 
@@ -64,7 +75,8 @@ enum Command {
         year: Option<i32>,
     },
 
-    /// Fetch yesterday's treasury curve + today's SOFR and append to current-year parquet.
+    /// Fetch yesterday's treasury curve + today's SOFR/EFFR/OBFR and append
+    /// to current-year parquet.
     AppendToday,
 
     /// Read from bundled parquet and print to stdout.
@@ -72,6 +84,13 @@ enum Command {
         #[command(subcommand)]
         source: GetSource,
     },
+
+    /// Generate (or regenerate) `data/manifest.json` with SHA-256 digests for
+    /// all parquet files in the data directory.
+    ///
+    /// The manifest is used by the curvekit client to verify integrity of
+    /// fetched parquet files. Commit it alongside the data files.
+    Manifest,
 }
 
 #[derive(Subcommand, Debug)]
@@ -84,6 +103,18 @@ enum GetSource {
     },
     /// Print the SOFR overnight rate for a date.
     Sofr {
+        /// Date in YYYY-MM-DD format.
+        #[arg(long, short)]
+        date: String,
+    },
+    /// Print the EFFR overnight rate for a date.
+    Effr {
+        /// Date in YYYY-MM-DD format.
+        #[arg(long, short)]
+        date: String,
+    },
+    /// Print the OBFR overnight rate for a date.
+    Obfr {
         /// Date in YYYY-MM-DD format.
         #[arg(long, short)]
         date: String,
@@ -103,8 +134,6 @@ async fn main() -> Result<()> {
 
     // Resolve data dir: CLI flag > env var (handled by clap) > repo default.
     let data_dir = cli.data_dir.unwrap_or_else(|| {
-        // Relative to the CLI binary at target/release/curvekit-cli → ../../data
-        // But CARGO_MANIFEST_DIR gives us the cli/ directory at compile time.
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("data")
@@ -140,7 +169,20 @@ async fn main() -> Result<()> {
                 let rate = curvekit::sofr(d).with_context(|| format!("reading SOFR for {d}"))?;
                 println!("SOFR — {d}: {:.6}% (continuously compounded)", rate * 100.0);
             }
+            GetSource::Effr { date } => {
+                let d = parse_date(&date)?;
+                let rate = read_overnight_rate(&data_dir, "effr", d)?;
+                println!("EFFR — {d}: {:.6}% (continuously compounded)", rate * 100.0);
+            }
+            GetSource::Obfr { date } => {
+                let d = parse_date(&date)?;
+                let rate = read_overnight_rate(&data_dir, "obfr", d)?;
+                println!("OBFR — {d}: {:.6}% (continuously compounded)", rate * 100.0);
+            }
         },
+        Command::Manifest => {
+            cmd_manifest(&data_dir)?;
+        }
     }
 
     Ok(())
@@ -169,14 +211,22 @@ async fn cmd_backfill(
                 }
                 fetch_sofr_year(data_dir, y).await?;
             }
-            other => bail!("unknown source '{other}' — use 'treasury' or 'sofr'"),
+            "effr" => {
+                fetch_effr_year(data_dir, y).await?;
+            }
+            "obfr" => {
+                if y < 2016 {
+                    bail!("OBFR data only available from 2016 onwards");
+                }
+                fetch_obfr_year(data_dir, y).await?;
+            }
+            other => bail!("unknown source '{other}' — use 'treasury', 'sofr', 'effr', or 'obfr'"),
         }
         return Ok(());
     }
 
     // Multi-year mode.
     let n = years.unwrap_or(25) as i32;
-
     let mut had_error = false;
 
     match source {
@@ -184,7 +234,7 @@ async fn cmd_backfill(
             let start_year = (current_year - n + 1).max(2000);
             for y in start_year..=current_year {
                 if let Err(e) = fetch_treasury_year(data_dir, y).await {
-                    tracing::error!(source = "treasury", year = y, error = %e, "fetch failed");
+                    tracing::error!(source = "treasury", year = y, error = %e);
                     had_error = true;
                 }
             }
@@ -193,29 +243,63 @@ async fn cmd_backfill(
             let start_year = (current_year - n + 1).max(2018);
             for y in start_year..=current_year {
                 if let Err(e) = fetch_sofr_year(data_dir, y).await {
-                    tracing::error!(source = "sofr", year = y, error = %e, "fetch failed");
+                    tracing::error!(source = "sofr", year = y, error = %e);
+                    had_error = true;
+                }
+            }
+        }
+        Some("effr") => {
+            let start_year = (current_year - n + 1).max(2000);
+            for y in start_year..=current_year {
+                if let Err(e) = fetch_effr_year(data_dir, y).await {
+                    tracing::error!(source = "effr", year = y, error = %e);
+                    had_error = true;
+                }
+            }
+        }
+        Some("obfr") => {
+            let start_year = (current_year - n + 1).max(2016);
+            for y in start_year..=current_year {
+                if let Err(e) = fetch_obfr_year(data_dir, y).await {
+                    tracing::error!(source = "obfr", year = y, error = %e);
                     had_error = true;
                 }
             }
         }
         None => {
-            // Both sources.
+            // All sources.
             let t_start = (current_year - n + 1).max(2000);
             for y in t_start..=current_year {
                 if let Err(e) = fetch_treasury_year(data_dir, y).await {
-                    tracing::error!(source = "treasury", year = y, error = %e, "fetch failed");
+                    tracing::error!(source = "treasury", year = y, error = %e);
                     had_error = true;
                 }
             }
             let s_start = (current_year - n + 1).max(2018);
             for y in s_start..=current_year {
                 if let Err(e) = fetch_sofr_year(data_dir, y).await {
-                    tracing::error!(source = "sofr", year = y, error = %e, "fetch failed");
+                    tracing::error!(source = "sofr", year = y, error = %e);
+                    had_error = true;
+                }
+            }
+            let e_start = (current_year - n + 1).max(2000);
+            for y in e_start..=current_year {
+                if let Err(e) = fetch_effr_year(data_dir, y).await {
+                    tracing::error!(source = "effr", year = y, error = %e);
+                    had_error = true;
+                }
+            }
+            let o_start = (current_year - n + 1).max(2016);
+            for y in o_start..=current_year {
+                if let Err(e) = fetch_obfr_year(data_dir, y).await {
+                    tracing::error!(source = "obfr", year = y, error = %e);
                     had_error = true;
                 }
             }
         }
-        Some(other) => bail!("unknown source '{other}' — use 'treasury' or 'sofr'"),
+        Some(other) => {
+            bail!("unknown source '{other}' — use 'treasury', 'sofr', 'effr', or 'obfr'")
+        }
     }
 
     if had_error {
@@ -228,15 +312,13 @@ async fn cmd_backfill(
 async fn fetch_treasury_year(data_dir: &std::path::Path, year: i32) -> Result<()> {
     tracing::info!("fetching treasury {year}...");
     let fetcher = HttpTreasuryFetcher::new()?;
-    let start = year as u32 * 10000 + 101; // YYYYMMDD: Jan 1
-    let end = year as u32 * 10000 + 1231; // YYYYMMDD: Dec 31
+    let start = year as u32 * 10000 + 101;
+    let end = year as u32 * 10000 + 1231;
     let curves = fetcher
         .fetch(start, end)
         .await
         .with_context(|| format!("treasury fetch for {year}"))?;
     if curves.is_empty() {
-        // Not an error — could be a year with no published data yet (e.g. current partial year
-        // with no trading days yet fetched). Log and skip silently so the caller can decide.
         tracing::warn!("treasury {year}: upstream returned 0 rows — skipping write");
         return Ok(());
     }
@@ -272,15 +354,55 @@ async fn fetch_sofr_year(data_dir: &std::path::Path, year: i32) -> Result<()> {
     Ok(())
 }
 
+async fn fetch_effr_year(data_dir: &std::path::Path, year: i32) -> Result<()> {
+    tracing::info!("fetching effr {year}...");
+    let fetcher = HttpEffrFetcher::new()?;
+    let start = year as u32 * 10000 + 101;
+    let end = year as u32 * 10000 + 1231;
+    let rates = fetcher
+        .fetch(start, end)
+        .await
+        .with_context(|| format!("effr fetch for {year}"))?;
+    if rates.is_empty() {
+        tracing::warn!("effr {year}: upstream returned 0 rows — skipping write");
+        return Ok(());
+    }
+    let n = rates.len();
+    let days: Vec<EffrDay> = rates;
+    write_effr_year(data_dir, year, &days).with_context(|| format!("writing effr {year}"))?;
+    tracing::info!("wrote effr-{year}.parquet: {n} rows");
+    Ok(())
+}
+
+async fn fetch_obfr_year(data_dir: &std::path::Path, year: i32) -> Result<()> {
+    tracing::info!("fetching obfr {year}...");
+    let fetcher = HttpObfrFetcher::new()?;
+    let start = year as u32 * 10000 + 101;
+    let end = year as u32 * 10000 + 1231;
+    let rates = fetcher
+        .fetch(start, end)
+        .await
+        .with_context(|| format!("obfr fetch for {year}"))?;
+    if rates.is_empty() {
+        tracing::warn!("obfr {year}: upstream returned 0 rows — skipping write");
+        return Ok(());
+    }
+    let n = rates.len();
+    let days: Vec<ObfrDay> = rates;
+    write_obfr_year(data_dir, year, &days).with_context(|| format!("writing obfr {year}"))?;
+    tracing::info!("wrote obfr-{year}.parquet: {n} rows");
+    Ok(())
+}
+
 // ── append-today ──────────────────────────────────────────────────────────────
 
 async fn cmd_append_today(data_dir: &std::path::Path) -> Result<()> {
     let today = Utc::now().date_naive();
     let yesterday = today.pred_opt().unwrap_or(today);
+    let yyyymmdd = |d: NaiveDate| d.year() as u32 * 10000 + d.month() * 100 + d.day();
 
     // Treasury: yesterday's close.
     let t_fetcher = HttpTreasuryFetcher::new()?;
-    let yyyymmdd = |d: NaiveDate| d.year() as u32 * 10000 + d.month() * 100 + d.day();
     let t_start = yyyymmdd(yesterday);
     let t_end = yyyymmdd(yesterday);
 
@@ -298,7 +420,7 @@ async fn cmd_append_today(data_dir: &std::path::Path) -> Result<()> {
         Err(e) => tracing::warn!("treasury fetch failed: {e}"),
     }
 
-    // SOFR: today's publication (or yesterday if not yet published).
+    // SOFR/EFFR/OBFR: today's or yesterday's publication.
     let s_fetcher = HttpSofrFetcher::new()?;
     let s_start = yyyymmdd(yesterday);
     let s_end = yyyymmdd(today);
@@ -311,13 +433,125 @@ async fn cmd_append_today(data_dir: &std::path::Path) -> Result<()> {
                 tracing::info!("appended sofr {}", rate.date);
             }
             if rates.is_empty() {
-                tracing::warn!("no SOFR data for {yesterday}–{today} (weekend/holiday?)");
+                tracing::warn!("no SOFR data for {yesterday}–{today}");
             }
         }
         Err(e) => tracing::warn!("SOFR fetch failed: {e}"),
     }
 
+    let e_fetcher = HttpEffrFetcher::new()?;
+    match e_fetcher.fetch(s_start, s_end).await {
+        Ok(rates) => {
+            for rate in &rates {
+                append_effr_day(data_dir, rate.date, rate.rate)
+                    .with_context(|| format!("appending effr {}", rate.date))?;
+                tracing::info!("appended effr {}", rate.date);
+            }
+            if rates.is_empty() {
+                tracing::warn!("no EFFR data for {yesterday}–{today}");
+            }
+        }
+        Err(e) => tracing::warn!("EFFR fetch failed: {e}"),
+    }
+
+    let o_fetcher = HttpObfrFetcher::new()?;
+    match o_fetcher.fetch(s_start, s_end).await {
+        Ok(rates) => {
+            for rate in &rates {
+                append_obfr_day(data_dir, rate.date, rate.rate)
+                    .with_context(|| format!("appending obfr {}", rate.date))?;
+                tracing::info!("appended obfr {}", rate.date);
+            }
+            if rates.is_empty() {
+                tracing::warn!("no OBFR data for {yesterday}–{today}");
+            }
+        }
+        Err(e) => tracing::warn!("OBFR fetch failed: {e}"),
+    }
+
     Ok(())
+}
+
+// ── manifest ──────────────────────────────────────────────────────────────────
+
+/// Generate `data/manifest.json` — SHA-256 digests for all parquet files.
+///
+/// The manifest format is:
+/// ```json
+/// {
+///   "treasury-2020.parquet": "sha256:<hex>",
+///   "sofr-2020.parquet":     "sha256:<hex>",
+///   ...
+/// }
+/// ```
+///
+/// The curvekit client downloads this manifest at session start and verifies
+/// each fetched parquet file against it. Regenerate after every backfill run.
+fn cmd_manifest(data_dir: &std::path::Path) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    let mut entries: BTreeMap<String, String> = BTreeMap::new();
+
+    let read_dir = std::fs::read_dir(data_dir)
+        .with_context(|| format!("reading data dir {}", data_dir.display()))?;
+
+    for entry in read_dir.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().to_string();
+        if !name_str.ends_with(".parquet") {
+            continue;
+        }
+        let path = entry.path();
+        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let digest = hasher.finalize();
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        entries.insert(name_str, format!("sha256:{hex}"));
+    }
+
+    let manifest =
+        serde_json::to_string_pretty(&entries).context("serializing manifest to JSON")?;
+    let manifest_path = data_dir.join("manifest.json");
+    std::fs::write(&manifest_path, manifest)
+        .with_context(|| format!("writing {}", manifest_path.display()))?;
+
+    println!(
+        "Wrote manifest with {} entries → {}",
+        entries.len(),
+        manifest_path.display()
+    );
+    Ok(())
+}
+
+// ── overnight-rate reader (for `get effr/obfr`) ───────────────────────────────
+
+fn read_overnight_rate(data_dir: &std::path::Path, prefix: &str, date: NaiveDate) -> Result<f64> {
+    use chrono::Datelike;
+    let year = date.year();
+    let path = data_dir.join(format!("{prefix}-{year}.parquet"));
+    if !path.exists() {
+        bail!("{prefix}-{year}.parquet not found — run: curvekit-cli backfill --source {prefix} --year {year}");
+    }
+    match prefix {
+        "effr" => {
+            let rates = curvekit::sources::parquet_io::read_effr_year(&path)?;
+            rates
+                .into_iter()
+                .find(|r| r.date == date)
+                .map(|r| r.rate)
+                .ok_or_else(|| anyhow::anyhow!("no EFFR for {date}"))
+        }
+        "obfr" => {
+            let rates = curvekit::sources::parquet_io::read_obfr_year(&path)?;
+            rates
+                .into_iter()
+                .find(|r| r.date == date)
+                .map(|r| r.rate)
+                .ok_or_else(|| anyhow::anyhow!("no OBFR for {date}"))
+        }
+        _ => bail!("unknown prefix: {prefix}"),
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
