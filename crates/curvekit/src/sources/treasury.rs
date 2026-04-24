@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use tracing::warn;
 
 use crate::curve::YieldCurve;
-use crate::error::{CurvekitError, Result, TreasuryError};
+use crate::error::{Error, Result};
 
 /// Standard Treasury maturity column names as they appear in the CSV header.
 const MATURITY_COLUMNS: [&str; 12] = [
@@ -51,16 +51,14 @@ pub fn parse_treasury_csv(csv: &str) -> Result<Vec<YieldCurve>> {
     let mut lines = csv.lines();
     let header = lines
         .next()
-        .ok_or_else(|| CurvekitError::TreasuryFetch(TreasuryError::Parse("empty CSV".into())))?;
+        .ok_or_else(|| Error::Treasury("empty CSV".into()))?;
 
     let headers: Vec<&str> = split_csv_row(header);
 
     let date_idx = headers
         .iter()
         .position(|h| h.trim_matches('"').trim() == "Date")
-        .ok_or_else(|| {
-            CurvekitError::TreasuryFetch(TreasuryError::Parse("missing 'Date' column".into()))
-        })?;
+        .ok_or_else(|| Error::Treasury("missing 'Date' column".into()))?;
 
     // Map each standard maturity column to its position (None = absent).
     let col_indices: [Option<usize>; 12] = std::array::from_fn(|i| {
@@ -198,9 +196,9 @@ impl HttpTreasuryFetcher {
 impl TreasuryFetcher for HttpTreasuryFetcher {
     async fn fetch(&self, start: u32, end: u32) -> Result<Vec<YieldCurve>> {
         if start > end {
-            return Err(CurvekitError::TreasuryFetch(
-                TreasuryError::InvalidDateRange { start, end },
-            ));
+            return Err(Error::Treasury(format!(
+                "invalid date range: start {start} > end {end}"
+            )));
         }
         let start_year = (start / 10000) as i32;
         let end_year = (end / 10000) as i32;
@@ -212,13 +210,10 @@ impl TreasuryFetcher for HttpTreasuryFetcher {
                 .client
                 .get(&url)
                 .send()
-                .await
-                .map_err(TreasuryError::Http)?
-                .error_for_status()
-                .map_err(TreasuryError::Http)?
+                .await?
+                .error_for_status()?
                 .text()
-                .await
-                .map_err(TreasuryError::Http)?;
+                .await?;
             all.extend(parse_treasury_csv(&body)?);
         }
 

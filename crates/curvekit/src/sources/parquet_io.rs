@@ -28,7 +28,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::curve::{SofrDay, YieldCurve, YieldCurveDay};
-use crate::error::{CurvekitError, ParquetError, Result};
+use crate::error::{Error, Result};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -106,19 +106,13 @@ pub fn write_treasury_year(data_dir: &Path, year: i32, curves: &[YieldCurveDay])
     let batch = RecordBatch::try_new(
         treasury_schema(),
         vec![Arc::new(dates), Arc::new(tenors), Arc::new(yields)],
-    )
-    .map_err(|e| CurvekitError::Parquet(ParquetError::Arrow(e)))?;
+    )?;
 
     let path = data_dir.join(format!("treasury-{year}.parquet"));
-    let file = fs::File::create(&path).map_err(|e| CurvekitError::Parquet(ParquetError::Io(e)))?;
-    let mut writer = ArrowWriter::try_new(file, treasury_schema(), Some(writer_props()))
-        .map_err(|e| CurvekitError::Parquet(ParquetError::Parquet(e)))?;
-    writer
-        .write(&batch)
-        .map_err(|e| CurvekitError::Parquet(ParquetError::Parquet(e)))?;
-    writer
-        .close()
-        .map_err(|e| CurvekitError::Parquet(ParquetError::Parquet(e)))?;
+    let file = fs::File::create(&path)?;
+    let mut writer = ArrowWriter::try_new(file, treasury_schema(), Some(writer_props()))?;
+    writer.write(&batch)?;
+    writer.close()?;
 
     tracing::info!("wrote {} rows → {}", rows.len(), path.display());
     Ok(())
@@ -135,19 +129,13 @@ pub fn write_sofr_year(data_dir: &Path, year: i32, rates: &[SofrDay]) -> Result<
         .map(|r| Some((r.rate * SCALE).round() as u32))
         .collect();
 
-    let batch = RecordBatch::try_new(sofr_schema(), vec![Arc::new(dates), Arc::new(bps)])
-        .map_err(|e| CurvekitError::Parquet(ParquetError::Arrow(e)))?;
+    let batch = RecordBatch::try_new(sofr_schema(), vec![Arc::new(dates), Arc::new(bps)])?;
 
     let path = data_dir.join(format!("sofr-{year}.parquet"));
-    let file = fs::File::create(&path).map_err(|e| CurvekitError::Parquet(ParquetError::Io(e)))?;
-    let mut writer = ArrowWriter::try_new(file, sofr_schema(), Some(writer_props()))
-        .map_err(|e| CurvekitError::Parquet(ParquetError::Parquet(e)))?;
-    writer
-        .write(&batch)
-        .map_err(|e| CurvekitError::Parquet(ParquetError::Parquet(e)))?;
-    writer
-        .close()
-        .map_err(|e| CurvekitError::Parquet(ParquetError::Parquet(e)))?;
+    let file = fs::File::create(&path)?;
+    let mut writer = ArrowWriter::try_new(file, sofr_schema(), Some(writer_props()))?;
+    writer.write(&batch)?;
+    writer.close()?;
 
     tracing::info!("wrote {} rows → {}", sorted.len(), path.display());
     Ok(())
@@ -212,41 +200,28 @@ type TreasuryRow = (NaiveDate, u32, u32); // (date, tenor_days, yield_bps)
 type SofrRow = (NaiveDate, u32); // (date, rate_bps)
 
 fn read_treasury_year_raw(path: &Path) -> Result<Vec<TreasuryRow>> {
-    let file = fs::File::open(path).map_err(|e| CurvekitError::Parquet(ParquetError::Io(e)))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| CurvekitError::Parquet(ParquetError::Parquet(e)))?;
-    let reader = builder
-        .build()
-        .map_err(|e| CurvekitError::Parquet(ParquetError::Parquet(e)))?;
+    let file = fs::File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let reader = builder.build()?;
 
     let mut rows = Vec::new();
     for batch in reader {
-        let batch = batch.map_err(|e| CurvekitError::Parquet(ParquetError::Arrow(e)))?;
+        let batch = batch?;
         let dates = batch
             .column(0)
             .as_any()
             .downcast_ref::<Date32Array>()
-            .ok_or_else(|| {
-                CurvekitError::Parquet(ParquetError::Schema("date column type mismatch".into()))
-            })?;
+            .ok_or_else(|| Error::Parquet("date column type mismatch".into()))?;
         let tenors = batch
             .column(1)
             .as_any()
             .downcast_ref::<UInt32Array>()
-            .ok_or_else(|| {
-                CurvekitError::Parquet(ParquetError::Schema(
-                    "tenor_days column type mismatch".into(),
-                ))
-            })?;
+            .ok_or_else(|| Error::Parquet("tenor_days column type mismatch".into()))?;
         let yields = batch
             .column(2)
             .as_any()
             .downcast_ref::<UInt32Array>()
-            .ok_or_else(|| {
-                CurvekitError::Parquet(ParquetError::Schema(
-                    "yield_bps column type mismatch".into(),
-                ))
-            })?;
+            .ok_or_else(|| Error::Parquet("yield_bps column type mismatch".into()))?;
 
         for i in 0..batch.num_rows() {
             if let Some(d) = from_date32(dates.value(i)) {
@@ -258,30 +233,23 @@ fn read_treasury_year_raw(path: &Path) -> Result<Vec<TreasuryRow>> {
 }
 
 fn read_sofr_year_raw(path: &Path) -> Result<Vec<SofrRow>> {
-    let file = fs::File::open(path).map_err(|e| CurvekitError::Parquet(ParquetError::Io(e)))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| CurvekitError::Parquet(ParquetError::Parquet(e)))?;
-    let reader = builder
-        .build()
-        .map_err(|e| CurvekitError::Parquet(ParquetError::Parquet(e)))?;
+    let file = fs::File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let reader = builder.build()?;
 
     let mut rows = Vec::new();
     for batch in reader {
-        let batch = batch.map_err(|e| CurvekitError::Parquet(ParquetError::Arrow(e)))?;
+        let batch = batch?;
         let dates = batch
             .column(0)
             .as_any()
             .downcast_ref::<Date32Array>()
-            .ok_or_else(|| {
-                CurvekitError::Parquet(ParquetError::Schema("date column type mismatch".into()))
-            })?;
+            .ok_or_else(|| Error::Parquet("date column type mismatch".into()))?;
         let bps_col = batch
             .column(1)
             .as_any()
             .downcast_ref::<UInt32Array>()
-            .ok_or_else(|| {
-                CurvekitError::Parquet(ParquetError::Schema("rate_bps column type mismatch".into()))
-            })?;
+            .ok_or_else(|| Error::Parquet("rate_bps column type mismatch".into()))?;
 
         for i in 0..batch.num_rows() {
             if let Some(d) = from_date32(dates.value(i)) {

@@ -14,20 +14,40 @@ curvekit = { git = "https://github.com/userFRM/curvekit" }
 
 Once published to crates.io: `cargo add curvekit`
 
-## Quick start
+## Quick start — one-off scripts
 
 ```rust
-use curvekit::{Curvekit, Tenor};
-use chrono::NaiveDate;
+use curvekit::Tenor;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let client = Curvekit::new()?;
+async fn main() -> curvekit::Result<()> {
+    // Free functions — no client setup, no chrono import
+    let curve = curvekit::treasury_curve_for("2020-03-20").await?;
+    let r     = curvekit::treasury_rate_at("2020-03-20", Tenor::Y10).await?;
+    let today = curvekit::treasury_today().await?;
+    let sofr  = curvekit::sofr_today().await?;
 
-    // Full Treasury yield curve for a date
-    let curve = client
-        .treasury_curve(NaiveDate::from_ymd_opt(2020, 3, 20).unwrap())
-        .await?;
+    println!("10Y on 2020-03-20: {r:.6}");
+    println!("Latest Treasury:   {}", today.date);
+    println!("Latest SOFR:       {:.4}%", sofr.rate * 100.0);
+    Ok(())
+}
+```
+
+## Client pattern — connection pool + cache reuse
+
+```rust
+use curvekit::{Curvekit, Date, Tenor};
+
+#[tokio::main]
+async fn main() -> curvekit::Result<()> {
+    let client = Curvekit::new();   // infallible, no ?
+
+    // Any date form — no chrono import needed
+    let curve = client.treasury_curve("2020-03-20").await?;
+    let curve = client.treasury_curve(20200320u32).await?;
+    let curve = client.treasury_curve((2020i32, 3u32, 20u32)).await?;
+    let curve = client.treasury_curve(Date::today_et()).await?;
 
     // Named tenors
     let r_10y = curve.get(Tenor::Y10).unwrap_or(0.0);
@@ -38,15 +58,17 @@ async fn main() -> anyhow::Result<()> {
     let r_45d = curve.get(Tenor::days(45));
     let r_18m = curve.get(Tenor::months(18));
 
-    // Client-side interpolation endpoint
-    let r = client
-        .treasury_rate(NaiveDate::from_ymd_opt(2020, 3, 20).unwrap(), Tenor::Y10)
-        .await?;
+    // Interpolated rate in one call
+    let r = client.treasury_rate("2020-03-20", Tenor::Y10).await?;
     println!("10Y interpolated: {r:.6}");
 
     // Latest SOFR observation
     let sofr = client.sofr_latest().await?;
     println!("SOFR {}: {:.4}%", sofr.date, sofr.rate * 100.0);
+
+    // Blocking from sync code — no async runtime needed
+    let curve = client.treasury_curve_blocking(20200320u32)?;
+    let r     = client.treasury_rate_blocking("2020-03-20", Tenor::Y10)?;
 
     Ok(())
 }
@@ -70,17 +92,50 @@ curvekit-cli append-today
 
 ## API surface
 
+### Free functions (one-off scripts)
+
+| Function | Returns |
+|---|---|
+| `treasury_today()` | `Result<YieldCurve>` — latest available curve |
+| `treasury_curve_for(date)` | `Result<YieldCurve>` |
+| `treasury_rate_at(date, tenor)` | `Result<f64>` — interpolated cc rate |
+| `sofr_today()` | `Result<SofrDay>` — latest SOFR observation |
+
+### Client methods
+
 | Method | Returns |
 |---|---|
 | `treasury_curve(date)` | `Result<YieldCurve>` |
 | `treasury_range(start, end)` | `Result<Vec<YieldCurve>>` |
-| `treasury_rate(date, impl Into<Tenor>)` | `Result<f64>` — interpolated cc rate |
+| `treasury_rate(date, tenor)` | `Result<f64>` — interpolated cc rate |
 | `treasury_latest()` | `Result<YieldCurve>` |
 | `treasury_earliest_date()` | `Result<NaiveDate>` |
 | `sofr(date)` | `Result<f64>` — cc overnight rate |
 | `sofr_range(start, end)` | `Result<Vec<SofrDay>>` |
 | `sofr_latest()` | `Result<SofrDay>` |
 | `sofr_earliest_date()` | `Result<NaiveDate>` |
+| `treasury_curve_blocking(date)` | `Result<YieldCurve>` — sync |
+| `treasury_range_blocking(start, end)` | `Result<Vec<YieldCurve>>` — sync |
+| `treasury_rate_blocking(date, tenor)` | `Result<f64>` — sync |
+| `treasury_latest_blocking()` | `Result<YieldCurve>` — sync |
+| `sofr_blocking(date)` | `Result<f64>` — sync |
+| `sofr_range_blocking(start, end)` | `Result<Vec<SofrDay>>` — sync |
+| `sofr_latest_blocking()` | `Result<SofrDay>` — sync |
+
+### Date inputs
+
+Every method that takes a date accepts any of these forms via `impl IntoDate`:
+
+```rust
+client.treasury_curve("2020-03-20").await?          // ISO string
+client.treasury_curve("2020/03/20").await?          // slashed string
+client.treasury_curve(20200320u32).await?           // YYYYMMDD integer
+client.treasury_curve((2020i32, 3u32, 20u32)).await? // YMD tuple
+client.treasury_curve(Date::today_et()).await?      // Date newtype
+client.treasury_curve(naive_date).await?            // NaiveDate (compat)
+```
+
+### Tenor
 
 `YieldCurve::get` and `YieldCurve::yield_at` both accept `impl Into<Tenor>` —
 pass `Tenor::Y10`, `Tenor::days(45)`, or a raw `u32` (backward-compatible).

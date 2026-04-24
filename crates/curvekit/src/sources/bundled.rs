@@ -19,13 +19,13 @@
 //!
 //! All functions in this module read from disk only. If a parquet file is
 //! missing (e.g. on first clone before backfill), the functions return
-//! `CurvekitError::DateNotFound`.
+//! `Error::DateNotFound`.
 
 use chrono::{Datelike, NaiveDate};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::error::{CurvekitError, Result};
+use crate::error::{Error, Result};
 use crate::sources::parquet_io::{read_sofr_year, read_treasury_year};
 use crate::tenor::Tenor;
 
@@ -59,13 +59,13 @@ fn data_dir() -> PathBuf {
 
 /// Read the full yield curve for `date` from the bundled parquet.
 ///
-/// Returns `CurvekitError::DateNotFound` if no curve exists for that date.
+/// Returns `Error::DateNotFound` if no curve exists for that date.
 pub fn treasury_curve(date: NaiveDate) -> Result<crate::YieldCurve> {
     let year = date.year();
     let path = data_dir().join(format!("treasury-{year}.parquet"));
 
     if !path.exists() {
-        return Err(CurvekitError::DateNotFound(format!(
+        return Err(Error::DateNotFound(format!(
             "treasury-{year}.parquet not found (run: curvekit backfill)"
         )));
     }
@@ -74,7 +74,7 @@ pub fn treasury_curve(date: NaiveDate) -> Result<crate::YieldCurve> {
     curves
         .into_iter()
         .find(|c| c.date == date)
-        .ok_or_else(|| CurvekitError::DateNotFound(format!("no treasury curve for {date}")))
+        .ok_or_else(|| Error::DateNotFound(format!("no treasury curve for {date}")))
 }
 
 /// Read the SOFR rate for `date` from the bundled parquet.
@@ -85,7 +85,7 @@ pub fn sofr(date: NaiveDate) -> Result<f64> {
     let path = data_dir().join(format!("sofr-{year}.parquet"));
 
     if !path.exists() {
-        return Err(CurvekitError::DateNotFound(format!(
+        return Err(Error::DateNotFound(format!(
             "sofr-{year}.parquet not found (run: curvekit backfill)"
         )));
     }
@@ -95,7 +95,7 @@ pub fn sofr(date: NaiveDate) -> Result<f64> {
         .into_iter()
         .find(|r| r.date == date)
         .map(|r| r.rate)
-        .ok_or_else(|| CurvekitError::DateNotFound(format!("no SOFR for {date}")))
+        .ok_or_else(|| Error::DateNotFound(format!("no SOFR for {date}")))
 }
 
 /// Interpolated continuously-compounded rate at an arbitrary tenor to maturity.
@@ -111,7 +111,7 @@ pub fn rate_for(date: NaiveDate, tenor: impl Into<Tenor>) -> Result<f64> {
     let curve = treasury_curve(date)?;
     curve
         .get(tenor)
-        .ok_or_else(|| CurvekitError::Interpolation(format!("empty curve for {date}")))
+        .ok_or_else(|| Error::Interpolation(format!("empty curve for {date}")))
 }
 
 /// Interpolated continuously-compounded rate at arbitrary `days` to maturity.

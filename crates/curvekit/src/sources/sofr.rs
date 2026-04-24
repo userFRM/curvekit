@@ -17,7 +17,7 @@ use chrono::NaiveDate;
 use tracing::warn;
 
 use crate::curve::SofrRate;
-use crate::error::{CurvekitError, Result, SofrError};
+use crate::error::{Error, Result};
 
 /// Trait for fetching SOFR observations. Implemented by [`HttpSofrFetcher`];
 /// test stubs can provide alternative implementations.
@@ -39,27 +39,19 @@ pub fn parse_sofr_csv(csv: &str) -> Result<Vec<SofrRate>> {
     let mut lines = csv.lines();
     let header = lines
         .next()
-        .ok_or_else(|| CurvekitError::SofrFetch(SofrError::Parse("empty SOFR CSV".into())))?;
+        .ok_or_else(|| Error::Sofr("empty SOFR CSV".into()))?;
 
     let headers: Vec<&str> = header.split(',').map(str::trim).collect();
 
     let date_idx = headers
         .iter()
         .position(|h| *h == "Effective Date")
-        .ok_or_else(|| {
-            CurvekitError::SofrFetch(SofrError::Parse(
-                "SOFR CSV missing 'Effective Date' column".into(),
-            ))
-        })?;
+        .ok_or_else(|| Error::Sofr("SOFR CSV missing 'Effective Date' column".into()))?;
 
     let rate_idx = headers
         .iter()
         .position(|h| *h == "Rate (%)")
-        .ok_or_else(|| {
-            CurvekitError::SofrFetch(SofrError::Parse(
-                "SOFR CSV missing 'Rate (%)' column".into(),
-            ))
-        })?;
+        .ok_or_else(|| Error::Sofr("SOFR CSV missing 'Rate (%)' column".into()))?;
 
     let mut rates = Vec::new();
 
@@ -159,23 +151,19 @@ impl HttpSofrFetcher {
 impl SofrFetcher for HttpSofrFetcher {
     async fn fetch(&self, start: u32, end: u32) -> Result<Vec<SofrRate>> {
         if start > end {
-            return Err(CurvekitError::SofrFetch(SofrError::InvalidDateRange {
-                start,
-                end,
-            }));
+            return Err(Error::Sofr(format!(
+                "invalid date range: start {start} > end {end}"
+            )));
         }
         let url = Self::url(start, end);
         let body = self
             .client
             .get(&url)
             .send()
-            .await
-            .map_err(SofrError::Http)?
-            .error_for_status()
-            .map_err(SofrError::Http)?
+            .await?
+            .error_for_status()?
             .text()
-            .await
-            .map_err(SofrError::Http)?;
+            .await?;
         parse_sofr_csv(&body)
     }
 }

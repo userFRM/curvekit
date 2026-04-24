@@ -21,10 +21,11 @@
 //! 5. Network error and cache exists → warn + return stale cache.
 //! 6. Network error and no cache → return `Err`.
 
-use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use reqwest::StatusCode;
 use std::path::{Path, PathBuf};
+
+use crate::error::{Error, Result};
 
 /// ETag-aware fetcher backed by a local disk cache.
 pub(crate) struct CachedFetcher {
@@ -71,17 +72,17 @@ impl CachedFetcher {
                 }
                 Ok(bytes)
             }
-            Ok(resp) => Err(anyhow!(
+            Ok(resp) => Err(Error::Other(format!(
                 "fetch {key}: HTTP {} {}",
                 resp.status().as_u16(),
                 resp.status().canonical_reason().unwrap_or("")
-            )),
+            ))),
             Err(e) if cache_path.exists() => {
                 tracing::warn!(key, error = %e, "network fetch failed, using stale cache");
                 let bytes = tokio::fs::read(&cache_path).await?;
                 Ok(bytes.into())
             }
-            Err(e) => Err(e.into()),
+            Err(e) => Err(Error::Http(e)),
         }
     }
 }
