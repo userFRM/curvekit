@@ -54,17 +54,27 @@ pub enum Error {
     #[error("parquet error: {0}")]
     ParquetNative(#[from] parquet::errors::ParquetError),
 
+    /// SHA-256 digest of a fetched file does not match the manifest entry.
+    ///
+    /// The corrupt bytes were NOT written to the on-disk cache.
+    #[error("checksum mismatch for {file}: expected sha256:{expected} got sha256:{actual}")]
+    ChecksumMismatch {
+        file: String,
+        expected: String,
+        actual: String,
+    },
+
     /// Any other error not covered by the specific variants above.
     #[error("{0}")]
     Other(String),
 }
 
-/// `Result<T>` alias using [`Error`].
+/// `Result<T>` alias using [`enum@Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 // ── Legacy compatibility shims ────────────────────────────────────────────────
 
-/// Alias for [`Error`] kept for backward compatibility.
+/// Alias for [`enum@Error`] kept for backward compatibility.
 ///
 /// Code that referenced `curvekit::CurvekitError` continues to compile.
 pub type CurvekitError = Error;
