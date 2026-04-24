@@ -125,8 +125,8 @@ SOFR is published as a percentage; conversion: `r_cc = ln(1 + rate_pct / 100)`.
 
 ## Interpolation
 
-`YieldCurve::get(days)` uses piecewise linear interpolation between bracketing
-tenor knots via `curvekit::interpolation::linear`. The function does flat
-extrapolation at the boundaries (clamps to the shortest/longest available
-tenor). `TermStructure::rate_for_days` inserts SOFR at the 1-day point before
+`YieldCurve::get(impl Into<Tenor>)` uses piecewise linear interpolation between
+bracketing tenor knots via `curvekit::interpolation::linear`. The function does
+flat extrapolation at the boundaries (clamps to the shortest/longest available
+tenor). `TermStructure::rate_for` inserts SOFR at the 1-day point before
 interpolating, providing a short-end anchor.

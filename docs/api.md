@@ -25,7 +25,8 @@ continuously compounded (converted from Treasury BEY on ingest).
 
 | Method | Description |
 |---|---|
-| `get(days) → Option<f64>` | Exact lookup or linear interpolation |
+| `get(impl Into<Tenor>) → Option<f64>` | Exact lookup or linear interpolation |
+| `yield_at(impl Into<Tenor>) → Option<f64>` | Alias for `get` |
 | `insert(days, rate)` | Insert a yield point |
 | `len() → usize` | Number of knots |
 | `to_continuous_map() → HashMap<u32, f64>` | Copy into a plain HashMap |
@@ -51,25 +52,45 @@ pub struct TermStructure {
 }
 ```
 
-`rate_for_days(days) → Option<f64>` inserts SOFR at the 1-day point before
-interpolating, giving a continuous term structure from overnight to 30Y.
+`rate_for(impl Into<Tenor>) → Option<f64>` inserts SOFR at the 1-day point
+before interpolating, giving a continuous term structure from overnight to 30Y.
 
-### `Tenor` constants
+### `Tenor`
+
+Semantic type for yield-curve maturities. Stored internally as days.
+
+**Named constants (Treasury calendar knots):**
 
 ```rust
+Tenor::ON  // 1d   overnight
+Tenor::W1  // 7d
 Tenor::M1  // 30d
 Tenor::M2  // 60d
-Tenor::M3  // 91d
-Tenor::M6  // 182d
+Tenor::M3  // 91d  (not 3×30=90 — Treasury knot)
+Tenor::M6  // 182d (not 6×30=180 — Treasury knot)
 Tenor::Y1  // 365d
 Tenor::Y2  // 730d
 Tenor::Y3  // 1095d
-Tenor::Y5  // 1825d
+Tenor::Y5  // 1826d (not 5×365=1825 — Treasury knot)
 Tenor::Y7  // 2555d
 Tenor::Y10 // 3650d
 Tenor::Y20 // 7300d
 Tenor::Y30 // 10950d
 ```
+
+**Constructors:**
+
+```rust
+Tenor::days(45)       // exact days
+Tenor::weeks(2)       // 2 × 7 = 14d
+Tenor::months(3)      // 3 × 30 = 90d
+Tenor::years(10)      // 10 × 365 = 3650d
+```
+
+**Parse from string:** `"10Y".parse::<Tenor>()`, `"3M"`, `"45D"`, `"2W"`, `"ON"`.
+All string forms use the mathematical approximations (`"3M"` → 90d, not Treasury's 91d).
+
+All methods accept `impl Into<Tenor>`, so raw `u32` day counts still compile.
 
 ## `Curvekit` client
 

@@ -3,54 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 use crate::interpolation;
-
-/// Standard tenor labels aligned to US Treasury maturities.
-///
-/// Days are approximate calendar days (months × 30, years × 365).
-/// This is the conventional mapping used for yield-curve math.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Tenor(pub u32);
-
-impl Tenor {
-    pub const M1: Tenor = Tenor(30);
-    pub const M2: Tenor = Tenor(60);
-    pub const M3: Tenor = Tenor(91);
-    pub const M6: Tenor = Tenor(182);
-    pub const Y1: Tenor = Tenor(365);
-    pub const Y2: Tenor = Tenor(730);
-    pub const Y3: Tenor = Tenor(1095);
-    pub const Y5: Tenor = Tenor(1825);
-    pub const Y7: Tenor = Tenor(2555);
-    pub const Y10: Tenor = Tenor(3650);
-    pub const Y20: Tenor = Tenor(7300);
-    pub const Y30: Tenor = Tenor(10950);
-
-    /// Days to maturity.
-    #[inline]
-    pub fn days(self) -> u32 {
-        self.0
-    }
-}
-
-impl std::fmt::Display for Tenor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0 {
-            30 => write!(f, "1M"),
-            60 => write!(f, "2M"),
-            91 => write!(f, "3M"),
-            182 => write!(f, "6M"),
-            365 => write!(f, "1Y"),
-            730 => write!(f, "2Y"),
-            1095 => write!(f, "3Y"),
-            1825 => write!(f, "5Y"),
-            2555 => write!(f, "7Y"),
-            3650 => write!(f, "10Y"),
-            7300 => write!(f, "20Y"),
-            10950 => write!(f, "30Y"),
-            d => write!(f, "{}d", d),
-        }
-    }
-}
+pub use crate::tenor::Tenor;
 
 /// A complete US Treasury yield curve for a single trading day.
 ///
@@ -85,13 +38,55 @@ impl YieldCurve {
         self.points.insert(days, rate);
     }
 
-    /// Look up the yield for an exact number of days, or linearly interpolate
-    /// between bracketing points. Returns `None` if the curve is empty.
-    pub fn get(&self, days: u32) -> Option<f64> {
+    /// Look up the yield at a tenor, or linearly interpolate between bracketing
+    /// points. Returns `None` if the curve is empty.
+    ///
+    /// Accepts any type that converts into [`Tenor`]: a named constant
+    /// (`Tenor::Y10`), a constructed value (`Tenor::days(45)`), or a raw `u32`
+    /// (backward-compatible).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use curvekit::{Tenor, YieldCurve};
+    /// use chrono::NaiveDate;
+    ///
+    /// let mut curve = YieldCurve::new(NaiveDate::from_ymd_opt(2020, 3, 20).unwrap());
+    /// curve.insert(91, 0.015);
+    /// curve.insert(3650, 0.025);
+    ///
+    /// // Named tenor
+    /// assert!(curve.get(Tenor::Y10).is_some());
+    ///
+    /// // Ad-hoc tenor
+    /// assert!(curve.get(Tenor::days(45)).is_some());
+    ///
+    /// // Raw u32 (backward-compatible)
+    /// assert!(curve.get(3650_u32).is_some());
+    /// ```
+    pub fn get(&self, tenor: impl Into<Tenor>) -> Option<f64> {
         if self.points.is_empty() {
             return None;
         }
-        interpolation::linear(&self.points, days)
+        interpolation::linear(&self.points, tenor.into().as_days())
+    }
+
+    /// Get the yield at a named tenor. Alias for [`get`][Self::get].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use curvekit::{Tenor, YieldCurve};
+    /// use chrono::NaiveDate;
+    ///
+    /// let mut curve = YieldCurve::new(NaiveDate::from_ymd_opt(2020, 3, 20).unwrap());
+    /// curve.insert(3650, 0.025);
+    ///
+    /// let r = curve.yield_at(Tenor::Y10).unwrap();
+    /// assert!((r - 0.025).abs() < 1e-12);
+    /// ```
+    pub fn yield_at(&self, tenor: impl Into<Tenor>) -> Option<f64> {
+        self.get(tenor)
     }
 
     /// Convenience: number of points in this curve.
@@ -139,11 +134,30 @@ pub struct TermStructure {
 }
 
 impl TermStructure {
-    /// Interpolate the continuously-compounded risk-free rate for `days`
-    /// to maturity. SOFR (1-day) is included as an anchor point.
+    /// Interpolate the continuously-compounded risk-free rate at `tenor`.
+    /// SOFR (1-day) is included as an anchor point.
+    ///
+    /// Accepts any type that converts into [`Tenor`]: `Tenor::Y10`,
+    /// `Tenor::days(45)`, or a raw `u32` (backward-compatible).
     ///
     /// Returns `None` if both the Treasury curve and SOFR are absent.
-    pub fn rate_for_days(&self, days: u32) -> Option<f64> {
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use curvekit::{Tenor, YieldCurve, curve::{SofrRate, TermStructure}};
+    /// use chrono::NaiveDate;
+    ///
+    /// let date = NaiveDate::from_ymd_opt(2020, 3, 20).unwrap();
+    /// let mut treasury = YieldCurve::new(date);
+    /// treasury.insert(365, 0.04);
+    /// let ts = TermStructure { date, treasury, sofr: None };
+    ///
+    /// let r = ts.rate_for(Tenor::Y1).unwrap();
+    /// assert!((r - 0.04).abs() < 1e-12);
+    /// ```
+    pub fn rate_for(&self, tenor: impl Into<Tenor>) -> Option<f64> {
+        let days = tenor.into().as_days();
         let mut points: BTreeMap<u32, f64> = self.treasury.points.clone();
         if let Some(sofr) = &self.sofr {
             points.insert(1, sofr.rate);
@@ -152,6 +166,21 @@ impl TermStructure {
             return None;
         }
         interpolation::linear(&points, days)
+    }
+
+    /// Interpolate the continuously-compounded risk-free rate for `days`
+    /// to maturity.
+    ///
+    /// # Deprecated
+    ///
+    /// Use [`rate_for`][Self::rate_for] with a [`Tenor`] value instead.
+    /// This shim will be removed in the next major release.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use `rate_for(Tenor::days(d))` or `rate_for(Tenor::Y10)` instead"
+    )]
+    pub fn rate_for_days(&self, days: u32) -> Option<f64> {
+        self.rate_for(days)
     }
 }
 
@@ -199,10 +228,10 @@ mod tests {
             sofr,
         };
         // At 1 day → SOFR
-        let r1 = ts.rate_for_days(1).unwrap();
+        let r1 = ts.rate_for(Tenor::ON).unwrap();
         assert!((r1 - 0.05).abs() < 1e-12);
         // At 365 days → treasury
-        let r365 = ts.rate_for_days(365).unwrap();
+        let r365 = ts.rate_for(Tenor::Y1).unwrap();
         assert!((r365 - 0.04).abs() < 1e-12);
     }
 

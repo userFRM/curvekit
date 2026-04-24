@@ -57,7 +57,7 @@ r = ln(1 + rate_pct / 100)
 ```
 
 SOFR is stored at the **1-day (overnight)** point in the term structure and
-serves as the short-end anchor when `TermStructure::rate_for_days` is called.
+serves as the short-end anchor when `TermStructure::rate_for` is called.
 
 ## Refresh schedule summary
 

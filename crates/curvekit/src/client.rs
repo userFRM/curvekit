@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use crate::curve::{SofrDay, YieldCurve};
 use crate::fetcher::{default_cache_dir, resolved_base_url, CachedFetcher};
 use crate::sources::parquet_io::{read_sofr_year, read_treasury_year};
+use crate::tenor::Tenor;
 
 /// Stateful curvekit client.
 ///
@@ -133,14 +134,15 @@ impl Curvekit {
     /// # Example
     ///
     /// ```no_run
-    /// # use curvekit::Curvekit;
+    /// # use curvekit::{Curvekit, Tenor};
     /// # use chrono::NaiveDate;
     /// # async fn run() -> anyhow::Result<()> {
     /// let client = Curvekit::new()?;
     /// let curve = client
     ///     .treasury_curve(NaiveDate::from_ymd_opt(2020, 3, 20).unwrap())
     ///     .await?;
-    /// println!("10Y: {:.4}%", curve.get(3650).unwrap_or(0.0) * 100.0);
+    /// println!("10Y: {:.4}%", curve.get(Tenor::Y10).unwrap_or(0.0) * 100.0);
+    /// println!("3M:  {:.4}%", curve.get(Tenor::M3).unwrap_or(0.0) * 100.0);
     /// # Ok(()) }
     /// ```
     pub async fn treasury_curve(&self, date: NaiveDate) -> Result<YieldCurve> {
@@ -201,11 +203,15 @@ impl Curvekit {
         Ok(out)
     }
 
-    /// Interpolated continuously-compounded rate at `days` to maturity for `date`.
+    /// Interpolated continuously-compounded rate at `tenor` to maturity for `date`.
     ///
     /// Calls [`treasury_curve`][Self::treasury_curve] internally and applies
     /// linear interpolation via [`YieldCurve::get`]. Extrapolates flat at
     /// the shortest and longest available tenors.
+    ///
+    /// Accepts any type that converts into [`Tenor`]: a named constant
+    /// (`Tenor::Y10`), a constructed value (`Tenor::days(45)`), or a raw `u32`
+    /// (backward-compatible).
     ///
     /// # Errors
     ///
@@ -215,21 +221,30 @@ impl Curvekit {
     /// # Example
     ///
     /// ```no_run
-    /// # use curvekit::Curvekit;
+    /// # use curvekit::{Curvekit, Tenor};
     /// # use chrono::NaiveDate;
     /// # async fn run() -> anyhow::Result<()> {
     /// let client = Curvekit::new()?;
-    /// let r = client
-    ///     .treasury_rate(NaiveDate::from_ymd_opt(2026, 4, 14).unwrap(), 45)
+    ///
+    /// // Named tenor
+    /// let r_10y = client
+    ///     .treasury_rate(NaiveDate::from_ymd_opt(2026, 4, 14).unwrap(), Tenor::Y10)
     ///     .await?;
-    /// println!("45d rate: {r:.6}");
+    /// println!("10Y rate: {r_10y:.6}");
+    ///
+    /// // Ad-hoc tenor
+    /// let r_45d = client
+    ///     .treasury_rate(NaiveDate::from_ymd_opt(2026, 4, 14).unwrap(), Tenor::days(45))
+    ///     .await?;
+    /// println!("45d rate: {r_45d:.6}");
     /// # Ok(()) }
     /// ```
-    pub async fn treasury_rate(&self, date: NaiveDate, days: u32) -> Result<f64> {
+    pub async fn treasury_rate(&self, date: NaiveDate, tenor: impl Into<Tenor>) -> Result<f64> {
+        let tenor = tenor.into();
         let curve = self.treasury_curve(date).await?;
         curve
-            .get(days)
-            .ok_or_else(|| anyhow!("no treasury data for {date} at {days}d"))
+            .get(tenor)
+            .ok_or_else(|| anyhow!("no treasury data for {date} at {}", tenor))
     }
 
     /// Latest available Treasury yield curve.

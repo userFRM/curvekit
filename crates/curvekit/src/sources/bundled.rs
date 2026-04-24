@@ -27,6 +27,7 @@ use std::path::PathBuf;
 
 use crate::error::{CurvekitError, Result};
 use crate::sources::parquet_io::{read_sofr_year, read_treasury_year};
+use crate::tenor::Tenor;
 
 // ---------------------------------------------------------------------------
 // Data directory resolution
@@ -97,15 +98,34 @@ pub fn sofr(date: NaiveDate) -> Result<f64> {
         .ok_or_else(|| CurvekitError::DateNotFound(format!("no SOFR for {date}")))
 }
 
-/// Interpolated continuously-compounded rate at arbitrary `days` to maturity.
+/// Interpolated continuously-compounded rate at an arbitrary tenor to maturity.
 ///
 /// Reads the Treasury curve for `date` and linearly interpolates. Includes
 /// flat extrapolation at the boundaries (same as [`crate::interpolation::linear`]).
-pub fn rate_for_days(date: NaiveDate, days: u32) -> Result<f64> {
+///
+/// Accepts any type that converts into [`Tenor`]: a named constant
+/// (`Tenor::Y10`), a constructed value (`Tenor::days(45)`), or a raw `u32`
+/// (backward-compatible).
+pub fn rate_for(date: NaiveDate, tenor: impl Into<Tenor>) -> Result<f64> {
+    let tenor = tenor.into();
     let curve = treasury_curve(date)?;
     curve
-        .get(days)
+        .get(tenor)
         .ok_or_else(|| CurvekitError::Interpolation(format!("empty curve for {date}")))
+}
+
+/// Interpolated continuously-compounded rate at arbitrary `days` to maturity.
+///
+/// # Deprecated
+///
+/// Use [`rate_for`] with a [`Tenor`] value instead.
+/// This shim will be removed in the next major release.
+#[deprecated(
+    since = "0.2.0",
+    note = "use `rate_for(date, Tenor::days(d))` or `rate_for(date, Tenor::Y10)` instead"
+)]
+pub fn rate_for_days(date: NaiveDate, days: u32) -> Result<f64> {
+    rate_for(date, days)
 }
 
 /// Latest date for which treasury data is bundled.

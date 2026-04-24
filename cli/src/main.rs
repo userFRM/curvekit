@@ -23,6 +23,7 @@ use curvekit::sources::parquet_io::{
 use curvekit::sources::sofr::HttpSofrFetcher;
 use curvekit::sources::treasury::HttpTreasuryFetcher;
 use curvekit::SofrFetcher;
+use curvekit::Tenor;
 use curvekit::TreasuryFetcher;
 
 // ── CLI definition ─────────────────────────────────────────────────────────────
@@ -327,19 +328,5 @@ fn parse_date(s: &str) -> Result<NaiveDate> {
 }
 
 fn format_tenor(days: u32) -> String {
-    match days {
-        30 => "1M".into(),
-        60 => "2M".into(),
-        91 => "3M".into(),
-        182 => "6M".into(),
-        365 => "1Y".into(),
-        730 => "2Y".into(),
-        1095 => "3Y".into(),
-        1825 => "5Y".into(),
-        2555 => "7Y".into(),
-        3650 => "10Y".into(),
-        7300 => "20Y".into(),
-        10950 => "30Y".into(),
-        d => format!("{d}d"),
-    }
+    Tenor::days(days).to_string()
 }

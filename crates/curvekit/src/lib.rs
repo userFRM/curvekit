@@ -7,7 +7,7 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use curvekit::Curvekit;
+//! use curvekit::{Curvekit, Tenor};
 //! use chrono::NaiveDate;
 //!
 //! #[tokio::main]
@@ -17,7 +17,21 @@
 //!     let curve = client
 //!         .treasury_curve(NaiveDate::from_ymd_opt(2020, 3, 20).unwrap())
 //!         .await?;
-//!     println!("10Y: {:.4}%", curve.get(3650).unwrap_or(0.0) * 100.0);
+//!
+//!     // Named tenors
+//!     let r_10y = curve.get(Tenor::Y10).unwrap_or(0.0);
+//!     let r_3m  = curve.get(Tenor::M3).unwrap_or(0.0);
+//!     println!("10Y: {:.4}%  3M: {:.4}%", r_10y * 100.0, r_3m * 100.0);
+//!
+//!     // Ad-hoc tenors
+//!     let r_45d = curve.get(Tenor::days(45));
+//!     let r_18m = curve.get(Tenor::months(18));
+//!
+//!     // Client-side interpolation
+//!     let r = client
+//!         .treasury_rate(NaiveDate::from_ymd_opt(2020, 3, 20).unwrap(), Tenor::Y10)
+//!         .await?;
+//!     println!("10Y interpolated: {r:.6}");
 //!
 //!     let sofr = client.sofr_latest().await?;
 //!     println!("SOFR {}: {:.4}%", sofr.date, sofr.rate * 100.0);
@@ -45,7 +59,8 @@
 //! # Modules
 //!
 //! - [`client`] — [`Curvekit`] async client.
-//! - [`curve`] — [`YieldCurve`], [`SofrDay`], [`SofrRate`], [`TermStructure`], [`Tenor`].
+//! - [`tenor`] — [`Tenor`] semantic type for maturities.
+//! - [`curve`] — [`YieldCurve`], [`SofrDay`], [`SofrRate`], [`TermStructure`].
 //! - [`sources::bundled`] — synchronous reader from local parquet (CLI `get`).
 //! - [`sources::parquet_io`] — parquet writer (CLI `backfill` / `append-today`).
 //! - [`sources::treasury`] — Treasury CSV fetcher (used by CLI).
@@ -59,13 +74,16 @@ pub mod error;
 pub(crate) mod fetcher;
 pub mod interpolation;
 pub mod sources;
+pub mod tenor;
 
 // Top-level re-exports.
 pub use client::Curvekit;
-pub use curve::{SofrDay, SofrRate, Tenor, TermStructure, YieldCurve, YieldCurveDay};
+pub use curve::{SofrDay, SofrRate, TermStructure, YieldCurve, YieldCurveDay};
 pub use error::{CurvekitError, Result};
+#[allow(deprecated)]
 pub use sources::bundled::{
-    rate_for_days, sofr, sofr_latest_date, treasury_curve, treasury_latest_date,
+    rate_for, rate_for_days, sofr, sofr_latest_date, treasury_curve, treasury_latest_date,
 };
 pub use sources::sofr::{parse_sofr_csv, HttpSofrFetcher, SofrFetcher};
 pub use sources::treasury::{parse_treasury_csv, HttpTreasuryFetcher, TreasuryFetcher};
+pub use tenor::Tenor;

@@ -17,7 +17,7 @@ Once published to crates.io: `cargo add curvekit`
 ## Quick start
 
 ```rust
-use curvekit::Curvekit;
+use curvekit::{Curvekit, Tenor};
 use chrono::NaiveDate;
 
 #[tokio::main]
@@ -25,12 +25,24 @@ async fn main() -> anyhow::Result<()> {
     let client = Curvekit::new()?;
 
     // Full Treasury yield curve for a date
-    let curve = client.treasury_curve(NaiveDate::from_ymd_opt(2020, 3, 20).unwrap()).await?;
-    println!("2020-03-20 10Y: {:.4}", curve.get(3650).unwrap_or(0.0));
+    let curve = client
+        .treasury_curve(NaiveDate::from_ymd_opt(2020, 3, 20).unwrap())
+        .await?;
 
-    // Interpolated rate at an arbitrary tenor
-    let r_30d = client.treasury_rate(NaiveDate::from_ymd_opt(2026, 4, 14).unwrap(), 30).await?;
-    println!("30d interp: {r_30d:.4}");
+    // Named tenors
+    let r_10y = curve.get(Tenor::Y10).unwrap_or(0.0);
+    let r_3m  = curve.get(Tenor::M3).unwrap_or(0.0);
+    println!("2020-03-20  10Y: {r_10y:.4}  3M: {r_3m:.4}");
+
+    // Ad-hoc tenors (linear interpolation between knots)
+    let r_45d = curve.get(Tenor::days(45));
+    let r_18m = curve.get(Tenor::months(18));
+
+    // Client-side interpolation endpoint
+    let r = client
+        .treasury_rate(NaiveDate::from_ymd_opt(2020, 3, 20).unwrap(), Tenor::Y10)
+        .await?;
+    println!("10Y interpolated: {r:.6}");
 
     // Latest SOFR observation
     let sofr = client.sofr_latest().await?;
@@ -62,13 +74,22 @@ curvekit-cli append-today
 |---|---|
 | `treasury_curve(date)` | `Result<YieldCurve>` |
 | `treasury_range(start, end)` | `Result<Vec<YieldCurve>>` |
-| `treasury_rate(date, days)` | `Result<f64>` — interpolated cc rate |
+| `treasury_rate(date, impl Into<Tenor>)` | `Result<f64>` — interpolated cc rate |
 | `treasury_latest()` | `Result<YieldCurve>` |
 | `treasury_earliest_date()` | `Result<NaiveDate>` |
 | `sofr(date)` | `Result<f64>` — cc overnight rate |
 | `sofr_range(start, end)` | `Result<Vec<SofrDay>>` |
 | `sofr_latest()` | `Result<SofrDay>` |
 | `sofr_earliest_date()` | `Result<NaiveDate>` |
+
+`YieldCurve::get` and `YieldCurve::yield_at` both accept `impl Into<Tenor>` —
+pass `Tenor::Y10`, `Tenor::days(45)`, or a raw `u32` (backward-compatible).
+
+`Tenor` constants: `ON`, `W1`, `M1`, `M2`, `M3`, `M6`, `Y1`, `Y2`, `Y3`,
+`Y5`, `Y7`, `Y10`, `Y20`, `Y30`.  Constructors: `Tenor::days(n)`,
+`Tenor::weeks(n)`, `Tenor::months(n)`, `Tenor::years(n)`.
+Parse from string (`"10Y"`, `"3M"`, `"45D"`, `"2W"`, `"ON"`) via
+`"10Y".parse::<Tenor>()`.
 
 All rates are continuously compounded. See [`docs/api.md`](docs/api.md) for
 full method signatures, parameters, and error conditions.
