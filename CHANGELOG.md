@@ -7,6 +7,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-04-24
+
+### Added
+
+- `Curvekit::with_mirror_url(Option<String>)` builder method — overrides
+  the CDN mirror URL, including a way to disable fallback entirely via
+  `None`. Takes precedence over `CURVEKIT_MIRROR_URL` env var.
+
 ## [1.0.0] - 2026-04-23
 
 ### Added
@@ -92,6 +100,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `curvekit` (CLI): `get treasury`, `get sofr`, `refresh`, `health`.
 - CI: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`.
 
+[1.0.1]: https://github.com/userFRM/curvekit/releases/tag/v1.0.1
 [1.0.0]: https://github.com/userFRM/curvekit/releases/tag/v1.0.0
 [0.2.0]: https://github.com/userFRM/curvekit/releases/tag/v0.2.0
 [0.1.0]: https://github.com/userFRM/curvekit/releases/tag/v0.1.0

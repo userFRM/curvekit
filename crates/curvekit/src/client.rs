@@ -158,6 +158,35 @@ impl Curvekit {
         self
     }
 
+    /// Override the CDN mirror URL used when the primary fetch fails.
+    ///
+    /// Default: jsDelivr CDN mirror of this repo. The mirror is activated
+    /// only when the primary GitHub raw fetch exhausts its retry budget.
+    ///
+    /// - `Some(url)` — use a custom mirror (self-hosted, R2, Fastly, …).
+    /// - `None` — disable mirror fallback entirely. A primary failure
+    ///   returns the error directly. Useful in tests where you want to
+    ///   observe primary-path behavior without the fallback masking it.
+    ///
+    /// Equivalent to `CURVEKIT_MIRROR_URL` env var. Builder form takes
+    /// precedence — the env var is read only if this method is not called.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use curvekit::Curvekit;
+    ///
+    /// // Disable mirror entirely (e.g. in tests)
+    /// let client = Curvekit::new().with_mirror_url(None);
+    ///
+    /// // Use a custom self-hosted mirror
+    /// let client = Curvekit::new().with_mirror_url(Some("https://mirror.example.com/curvekit".into()));
+    /// ```
+    pub fn with_mirror_url(mut self, url: Option<String>) -> Self {
+        self.fetcher.set_mirror_url(url);
+        self
+    }
+
     // ── Treasury endpoints ────────────────────────────────────────────────────
 
     /// Fetch the full US Treasury Par Yield Curve for a single date.
