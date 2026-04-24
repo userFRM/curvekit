@@ -133,13 +133,12 @@ impl Date {
     /// assert!(today.inner().year() >= 2024);
     /// ```
     pub fn today_et() -> Self {
-        // We don't take a dependency on chrono-tz for a single offset.
-        // Instead use the system local time, which on servers is typically set
-        // to UTC or ET. Callers who need exact ET behaviour should pass a
-        // specific date.
-        use chrono::Local;
-        let local = Local::now().date_naive();
-        Self(local)
+        // Market rates publish on NY Fed / US Treasury ET schedule,
+        // so today_et returns the ET calendar date regardless of where
+        // the process runs. DST handled by chrono-tz.
+        use chrono::Utc;
+        use chrono_tz::America::New_York;
+        Self(Utc::now().with_timezone(&New_York).date_naive())
     }
 
     /// Current date in UTC.
