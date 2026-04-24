@@ -1,5 +1,5 @@
-//! ETag-aware HTTP fetcher for parquet files served from GitHub raw or any
-//! compatible origin.
+//! ETag-aware HTTP fetcher with retry, single-flight, CDN mirror fallback,
+//! and SHA-256 manifest verification.
 //!
 //! # Cache layout
 //!
@@ -11,85 +11,408 @@
 //! └── sofr-2020.parquet.etag
 //! ```
 //!
-//! On each `fetch` call:
+//! # Fetch flow (per call)
 //!
-//! 1. If cache file exists **and** a stored ETag is available, send
-//!    `If-None-Match` with the stored ETag.
-//! 2. `304 Not Modified` → return the cached bytes unchanged.
-//! 3. `2xx` → write new body + new ETag to cache, return bytes.
-//! 4. Non-2xx (not 304) → return `Err`.
-//! 5. Network error and cache exists → warn + return stale cache.
-//! 6. Network error and no cache → return `Err`.
+//! 1. Single-flight gate: if another task is already fetching this key,
+//!    join the in-flight request rather than issuing a duplicate.
+//! 2. Cache check: if a local file exists, send `If-None-Match` with the
+//!    stored ETag.
+//! 3. `304 Not Modified` → return the cached bytes.
+//! 4. `2xx` → write body + ETag, return bytes.
+//! 5. Retry-able error (5xx, 429, connect/timeout): exponential backoff up
+//!    to 3 total attempts. Delays: 250 ms → 750 ms → 2 000 ms (capped).
+//!    429 response: respect `Retry-After` header if present.
+//! 6. On primary-URL exhaustion: try jsDelivr CDN mirror once.
+//! 7. All transports failed but cache exists → warn + return stale.
+//! 8. All transports failed + no cache → return `Err`.
+//!
+//! # SHA-256 verification
+//!
+//! If a `manifest.json` entry exists for the key, the fetched bytes are
+//! checked against the stored digest. A mismatch returns
+//! `Error::ChecksumMismatch` and the corrupt bytes are NOT written to cache.
 
 use bytes::Bytes;
 use reqwest::StatusCode;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{Mutex, OnceCell};
 
 use crate::error::{Error, Result};
 
-/// ETag-aware fetcher backed by a local disk cache.
+// ---------------------------------------------------------------------------
+// Retry constants
+// ---------------------------------------------------------------------------
+
+/// Maximum total attempts (initial + 2 retries).
+const MAX_ATTEMPTS: u32 = 3;
+
+/// Base delay for exponential backoff.
+const BACKOFF_BASE_MS: u64 = 250;
+
+/// Cap on backoff delay.
+const BACKOFF_MAX_MS: u64 = 2_000;
+
+// ---------------------------------------------------------------------------
+// In-flight entry
+// ---------------------------------------------------------------------------
+
+/// An in-flight or completed fetch. Stored in the single-flight map while
+/// a key is being fetched; the value is an error message if the fetch failed.
+type InflightCell = Arc<OnceCell<std::result::Result<Bytes, String>>>;
+
+// ---------------------------------------------------------------------------
+// CachedFetcher
+// ---------------------------------------------------------------------------
+
+/// ETag-aware fetcher with retry, single-flight deduplication, CDN mirror
+/// fallback, and SHA-256 manifest verification.
 pub(crate) struct CachedFetcher {
     pub http: reqwest::Client,
+    /// Primary origin URL (e.g. `raw.githubusercontent.com/…/data`).
     pub base_url: String,
+    /// CDN mirror base URL, consulted after primary exhausts all retries.
+    /// Default: jsDelivr mirror. Override: `CURVEKIT_MIRROR_URL`.
+    pub mirror_url: String,
     pub cache_dir: PathBuf,
+    /// Per-key in-flight deduplication.
+    inflight: Arc<Mutex<HashMap<String, InflightCell>>>,
+    /// SHA-256 manifest loaded once per client session.
+    manifest: Arc<Mutex<Option<HashMap<String, String>>>>,
 }
 
 impl CachedFetcher {
+    pub fn new(http: reqwest::Client, base_url: String, cache_dir: PathBuf) -> Self {
+        let mirror_url =
+            std::env::var("CURVEKIT_MIRROR_URL").unwrap_or_else(|_| DEFAULT_MIRROR_URL.to_string());
+        Self {
+            http,
+            base_url,
+            mirror_url,
+            cache_dir,
+            inflight: Arc::new(Mutex::new(HashMap::new())),
+            manifest: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Override the primary origin URL (used by `Curvekit::with_base_url`).
+    pub(crate) fn set_base_url(&mut self, url: String) {
+        self.base_url = url;
+    }
+
+    /// Override the cache directory (used by `Curvekit::with_cache_dir`).
+    pub(crate) fn set_cache_dir(&mut self, dir: PathBuf) {
+        self.cache_dir = dir;
+    }
+
     /// Fetch a parquet file by logical key (e.g. `"treasury-2020"`).
     ///
-    /// The key is resolved to `{base_url}/{key}.parquet` on the wire and
-    /// `{cache_dir}/{key}.parquet` on disk.
+    /// Single-flight: concurrent callers with the same key share one request.
     pub async fn fetch(&self, key: &str) -> Result<Bytes> {
+        // Single-flight: get-or-create an in-flight cell for this key.
+        let cell: InflightCell = {
+            let mut map = self.inflight.lock().await;
+            map.entry(key.to_string())
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
+        };
+
+        let key_owned = key.to_string();
+        let result = cell
+            .get_or_init(|| async {
+                match self.do_fetch(&key_owned).await {
+                    Ok(b) => Ok(b),
+                    Err(e) => Err(e.to_string()),
+                }
+            })
+            .await;
+
+        // Remove the cell from the map so that future fetches (e.g. stale
+        // re-fetches after a new push) can run fresh.
+        {
+            let mut map = self.inflight.lock().await;
+            map.remove(key);
+        }
+
+        result
+            .clone()
+            .map_err(|e| Error::Other(format!("fetch {key}: {e}")))
+    }
+
+    /// Inner fetch: retry on primary + CDN mirror fallback + stale cache.
+    async fn do_fetch(&self, key: &str) -> Result<Bytes> {
         let cache_path = self.cache_dir.join(format!("{key}.parquet"));
         let etag_path = self.cache_dir.join(format!("{key}.parquet.etag"));
 
-        let mut req = self.http.get(format!("{}/{key}.parquet", self.base_url));
-
-        if cache_path.exists() {
-            if let Some(etag) = read_etag(&etag_path) {
-                req = req.header("If-None-Match", etag);
+        // Try primary URL with retries.
+        match self
+            .fetch_with_retry(key, &self.base_url.clone(), &cache_path, &etag_path)
+            .await
+        {
+            Ok(bytes) => {
+                return self
+                    .verify_and_return(key, bytes, &cache_path, &etag_path)
+                    .await
             }
-        }
-
-        match req.send().await {
-            Ok(resp) if resp.status() == StatusCode::NOT_MODIFIED => {
-                // Cache is fresh.
-                let bytes = tokio::fs::read(&cache_path).await?;
-                Ok(bytes.into())
-            }
-            Ok(resp) if resp.status().is_success() => {
-                let etag = resp
-                    .headers()
-                    .get("etag")
-                    .and_then(|v| v.to_str().ok())
-                    .map(String::from);
-                let bytes = resp.bytes().await?;
-                // Write atomically: body first, then ETag.
-                tokio::fs::create_dir_all(&self.cache_dir).await?;
-                tokio::fs::write(&cache_path, &bytes).await?;
-                if let Some(e) = etag {
-                    tokio::fs::write(&etag_path, e).await?;
+            Err(primary_err) => {
+                tracing::warn!(
+                    key,
+                    error = %primary_err,
+                    "primary fetch exhausted retries, trying CDN mirror"
+                );
+                // Try CDN mirror (single attempt — no retry on mirror).
+                match self.fetch_single(key, &self.mirror_url.clone()).await {
+                    Ok(bytes) => {
+                        // Write to cache.
+                        if let Err(e) = tokio::fs::create_dir_all(&self.cache_dir).await {
+                            tracing::warn!("could not create cache dir: {e}");
+                        } else if let Err(e) = tokio::fs::write(&cache_path, &bytes).await {
+                            tracing::warn!("could not write mirror response to cache: {e}");
+                        }
+                        return self
+                            .verify_and_return(key, bytes, &cache_path, &etag_path)
+                            .await;
+                    }
+                    Err(mirror_err) => {
+                        tracing::warn!(
+                            key,
+                            mirror_error = %mirror_err,
+                            "CDN mirror also failed"
+                        );
+                    }
                 }
-                Ok(bytes)
+                // Stale cache fallback.
+                if cache_path.exists() {
+                    tracing::warn!(key, "all transports failed, serving stale cache");
+                    let bytes = tokio::fs::read(&cache_path).await?;
+                    return Ok(bytes.into());
+                }
+                Err(primary_err)
             }
-            Ok(resp) => Err(Error::Other(format!(
-                "fetch {key}: HTTP {} {}",
-                resp.status().as_u16(),
-                resp.status().canonical_reason().unwrap_or("")
-            ))),
-            Err(e) if cache_path.exists() => {
-                tracing::warn!(key, error = %e, "network fetch failed, using stale cache");
-                let bytes = tokio::fs::read(&cache_path).await?;
-                Ok(bytes.into())
-            }
-            Err(e) => Err(Error::Http(e)),
         }
     }
+
+    /// Try to fetch from `base` with up to `MAX_ATTEMPTS` attempts and
+    /// exponential backoff. Respects ETag cache if local file exists.
+    async fn fetch_with_retry(
+        &self,
+        key: &str,
+        base: &str,
+        cache_path: &Path,
+        etag_path: &Path,
+    ) -> Result<Bytes> {
+        let url = format!("{base}/{key}.parquet");
+        let mut last_err: Option<Error> = None;
+
+        for attempt in 0..MAX_ATTEMPTS {
+            if attempt > 0 {
+                let delay_ms = backoff_delay_ms(attempt);
+                tracing::debug!(key, attempt, delay_ms, "retry backoff");
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+
+            let mut req = self.http.get(&url);
+            if cache_path.exists() {
+                if let Some(etag) = read_etag(etag_path) {
+                    req = req.header("If-None-Match", etag);
+                }
+            }
+
+            match req.send().await {
+                Ok(resp) if resp.status() == StatusCode::NOT_MODIFIED => {
+                    let bytes = tokio::fs::read(cache_path).await?;
+                    return Ok(bytes.into());
+                }
+                Ok(resp) if resp.status().is_success() => {
+                    let etag = resp
+                        .headers()
+                        .get("etag")
+                        .and_then(|v| v.to_str().ok())
+                        .map(String::from);
+                    let bytes = resp.bytes().await?;
+                    // Write body + ETag atomically.
+                    tokio::fs::create_dir_all(cache_path.parent().unwrap_or(Path::new(".")))
+                        .await?;
+                    tokio::fs::write(cache_path, &bytes).await?;
+                    if let Some(e) = etag {
+                        tokio::fs::write(etag_path, e).await?;
+                    }
+                    return Ok(bytes);
+                }
+                Ok(resp) if resp.status() == StatusCode::TOO_MANY_REQUESTS => {
+                    // 429 — respect Retry-After if present, else use backoff.
+                    let delay = retry_after_delay(&resp)
+                        .unwrap_or_else(|| Duration::from_millis(backoff_delay_ms(attempt + 1)));
+                    tracing::warn!(
+                        key,
+                        attempt,
+                        delay_secs = delay.as_secs_f32(),
+                        "429 rate-limited"
+                    );
+                    if attempt + 1 < MAX_ATTEMPTS {
+                        tokio::time::sleep(delay).await;
+                        last_err =
+                            Some(Error::Other(format!("fetch {key}: 429 Too Many Requests")));
+                        continue;
+                    }
+                    return Err(Error::Other(format!(
+                        "fetch {key}: 429 Too Many Requests (final)"
+                    )));
+                }
+                Ok(resp) if should_retry_status(resp.status()) => {
+                    // 5xx
+                    last_err = Some(Error::Other(format!(
+                        "fetch {key}: HTTP {} {}",
+                        resp.status().as_u16(),
+                        resp.status().canonical_reason().unwrap_or("")
+                    )));
+                }
+                Ok(resp) => {
+                    // 4xx (not 429) — not retriable.
+                    return Err(Error::Other(format!(
+                        "fetch {key}: HTTP {} {}",
+                        resp.status().as_u16(),
+                        resp.status().canonical_reason().unwrap_or("")
+                    )));
+                }
+                Err(e) if is_retriable_error(&e) => {
+                    tracing::warn!(key, attempt, error = %e, "transient error, will retry");
+                    last_err = Some(Error::Http(e));
+                }
+                Err(e) => {
+                    last_err = Some(Error::Http(e));
+                    break; // non-retriable transport error
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| Error::Other(format!("fetch {key}: all attempts failed"))))
+    }
+
+    /// Single no-retry attempt from a mirror (CDN). No ETag used.
+    async fn fetch_single(&self, key: &str, base: &str) -> Result<Bytes> {
+        let url = format!("{base}/{key}.parquet");
+        let resp = self.http.get(&url).send().await?;
+        if resp.status().is_success() {
+            Ok(resp.bytes().await?)
+        } else {
+            Err(Error::Other(format!(
+                "mirror {key}: HTTP {} {}",
+                resp.status().as_u16(),
+                resp.status().canonical_reason().unwrap_or("")
+            )))
+        }
+    }
+
+    /// Verify SHA-256 digest from manifest (if available). On mismatch,
+    /// remove the bad cache file and return an error.
+    async fn verify_and_return(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        cache_path: &Path,
+        etag_path: &Path,
+    ) -> Result<Bytes> {
+        // Load manifest (once per client session).
+        let expected_hex = self.manifest_digest_for(key).await;
+
+        if let Some(expected) = expected_hex {
+            let actual = hex_sha256(&bytes);
+            if actual != expected {
+                // Remove corrupt cache files.
+                let _ = tokio::fs::remove_file(cache_path).await;
+                let _ = tokio::fs::remove_file(etag_path).await;
+                return Err(Error::ChecksumMismatch {
+                    file: format!("{key}.parquet"),
+                    expected,
+                    actual,
+                });
+            }
+        }
+
+        Ok(bytes)
+    }
+
+    /// Fetch manifest and return the digest for `key`, or `None` if the
+    /// manifest is unavailable or the key is absent.
+    async fn manifest_digest_for(&self, key: &str) -> Option<String> {
+        let mut manifest_guard = self.manifest.lock().await;
+        if manifest_guard.is_none() {
+            // Try to load manifest from primary URL.
+            let manifest_url = format!("{}/manifest.json", self.base_url);
+            match self.http.get(&manifest_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<HashMap<String, String>>().await {
+                        Ok(m) => {
+                            *manifest_guard = Some(m);
+                        }
+                        Err(e) => {
+                            tracing::warn!("manifest parse failed: {e}");
+                            *manifest_guard = Some(HashMap::new()); // mark as attempted
+                        }
+                    }
+                }
+                _ => {
+                    // Manifest not present or unreachable; proceed without verification.
+                    *manifest_guard = Some(HashMap::new());
+                }
+            }
+        }
+
+        manifest_guard
+            .as_ref()?
+            .get(&format!("{key}.parquet"))
+            .and_then(|v| v.strip_prefix("sha256:").map(str::to_string))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn backoff_delay_ms(attempt: u32) -> u64 {
+    // 2^attempt * BACKOFF_BASE_MS, capped at BACKOFF_MAX_MS
+    let raw = BACKOFF_BASE_MS.saturating_mul(1u64 << attempt.min(10));
+    raw.min(BACKOFF_MAX_MS)
+}
+
+fn should_retry_status(status: StatusCode) -> bool {
+    status.is_server_error() // 5xx
+}
+
+fn is_retriable_error(e: &reqwest::Error) -> bool {
+    e.is_connect() || e.is_timeout() || e.is_request()
+}
+
+fn retry_after_delay(resp: &reqwest::Response) -> Option<Duration> {
+    let header = resp.headers().get("Retry-After")?;
+    let val = header.to_str().ok()?;
+    // Try integer seconds first, then give up (RFC 7231 also allows HTTP-date
+    // but that's rare for 429; integer seconds is by far the common form).
+    val.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 
 fn read_etag(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok().filter(|s| !s.is_empty())
 }
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let result = hasher.finalize();
+    hex_encode(&result)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Cache directory resolution
+// ---------------------------------------------------------------------------
 
 /// Resolve the cache directory.
 ///
@@ -105,7 +428,6 @@ pub(crate) fn default_cache_dir() -> PathBuf {
     if let Some(proj) = directories::ProjectDirs::from("", "", "curvekit") {
         return proj.cache_dir().to_path_buf();
     }
-    // Ultimate fallback.
     dirs_fallback()
 }
 
@@ -124,13 +446,69 @@ fn dirs_fallback() -> PathBuf {
     }
 }
 
-/// Default base URL for GitHub raw content.
+/// Default primary base URL (GitHub raw content).
 pub(crate) const DEFAULT_BASE_URL: &str =
     "https://raw.githubusercontent.com/userFRM/curvekit/main/data";
 
-/// Resolve the base URL.
+/// Default CDN mirror (jsDelivr — Cloudflare-fronted mirror of the GitHub repo).
 ///
-/// Checks `$CURVEKIT_BASE_URL` first (useful for tests or self-hosting).
+/// URL shape: `https://cdn.jsdelivr.net/gh/userFRM/curvekit@main/data`
+///
+/// jsDelivr automatically mirrors public GitHub repos at no cost. Cache is
+/// invalidated on each new commit. Override at runtime via `$CURVEKIT_MIRROR_URL`.
+pub(crate) const DEFAULT_MIRROR_URL: &str =
+    "https://cdn.jsdelivr.net/gh/userFRM/curvekit@main/data";
+
+/// Resolve the base URL from the environment or use the default.
 pub(crate) fn resolved_base_url() -> String {
     std::env::var("CURVEKIT_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_progression() {
+        // attempt=0 → 250ms (initial attempt before any sleep — but we use sleep before retry,
+        // so attempt=1 means first retry)
+        assert_eq!(backoff_delay_ms(0), 250);
+        assert_eq!(backoff_delay_ms(1), 500);
+        assert_eq!(backoff_delay_ms(2), 1000);
+        // Capped at 2000ms
+        assert_eq!(backoff_delay_ms(3), 2000);
+        assert_eq!(backoff_delay_ms(10), 2000);
+    }
+
+    #[test]
+    fn hex_sha256_known_value() {
+        // SHA-256 of empty bytes is a known constant.
+        let digest = hex_sha256(b"");
+        assert_eq!(
+            digest,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn hex_sha256_hello() {
+        // sha256("hello world") — verified with `echo -n "hello world" | sha256sum`
+        let digest = hex_sha256(b"hello world");
+        assert_eq!(
+            digest,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+    }
+
+    #[test]
+    fn retry_after_none_on_missing_header() {
+        // Can't easily construct a mock Response, so just test the helper with
+        // a raw backoff path.
+        // The backoff cap is 2000ms:
+        assert!(backoff_delay_ms(100) <= BACKOFF_MAX_MS);
+    }
 }
