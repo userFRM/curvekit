@@ -21,7 +21,7 @@ use chrono::NaiveDate;
 use std::collections::BTreeMap;
 use tracing::warn;
 
-use crate::curve::YieldCurve;
+use crate::curve::{YieldCurve, YieldType};
 use crate::error::{Error, Result};
 
 /// Standard Treasury maturity column names as they appear in the CSV header.
@@ -118,7 +118,11 @@ pub fn parse_treasury_csv(csv: &str) -> Result<Vec<YieldCurve>> {
             }
         }
 
-        curves.push(YieldCurve { date, points });
+        curves.push(YieldCurve {
+            date,
+            yield_type: YieldType::Par,
+            points,
+        });
     }
 
     Ok(curves)

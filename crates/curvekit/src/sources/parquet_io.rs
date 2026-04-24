@@ -27,8 +27,10 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::curve::{SofrDay, YieldCurve, YieldCurveDay};
+use crate::curve::{SofrDay, YieldCurve, YieldCurveDay, YieldType};
 use crate::error::{Error, Result};
+use crate::sources::effr::EffrDay;
+use crate::sources::obfr::ObfrDay;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -120,25 +122,12 @@ pub fn write_treasury_year(data_dir: &Path, year: i32, curves: &[YieldCurveDay])
 
 /// Write (or overwrite) one year of SOFR rates to `{data_dir}/sofr-{year}.parquet`.
 pub fn write_sofr_year(data_dir: &Path, year: i32, rates: &[SofrDay]) -> Result<()> {
-    let mut sorted = rates.to_vec();
-    sorted.sort_by_key(|r| r.date);
-
-    let dates: Date32Array = sorted.iter().map(|r| Some(to_date32(r.date))).collect();
-    let bps: UInt32Array = sorted
-        .iter()
-        .map(|r| Some((r.rate * SCALE).round() as u32))
-        .collect();
-
-    let batch = RecordBatch::try_new(sofr_schema(), vec![Arc::new(dates), Arc::new(bps)])?;
-
-    let path = data_dir.join(format!("sofr-{year}.parquet"));
-    let file = fs::File::create(&path)?;
-    let mut writer = ArrowWriter::try_new(file, sofr_schema(), Some(writer_props()))?;
-    writer.write(&batch)?;
-    writer.close()?;
-
-    tracing::info!("wrote {} rows → {}", sorted.len(), path.display());
-    Ok(())
+    write_overnight_year(
+        data_dir,
+        "sofr",
+        year,
+        rates.iter().map(|r| (r.date, r.rate)),
+    )
 }
 
 /// Append one day's Treasury curve to the appropriate year file.
@@ -170,26 +159,7 @@ pub fn append_treasury_day(data_dir: &Path, date: NaiveDate, curve: &YieldCurve)
 
 /// Append one day's SOFR rate to the appropriate year file.
 pub fn append_sofr_day(data_dir: &Path, date: NaiveDate, rate: f64) -> Result<()> {
-    let year = date.format("%Y").to_string().parse::<i32>().unwrap();
-    let path = data_dir.join(format!("sofr-{year}.parquet"));
-
-    let mut existing = if path.exists() {
-        read_sofr_year_raw(&path)?
-    } else {
-        Vec::new()
-    };
-
-    existing.retain(|(d, _)| *d != date);
-    existing.push((date, (rate * SCALE).round() as u32));
-
-    let days: Vec<SofrDay> = existing
-        .into_iter()
-        .map(|(d, bps)| SofrDay {
-            date: d,
-            rate: bps as f64 / SCALE,
-        })
-        .collect();
-    write_sofr_year(data_dir, year, &days)
+    append_overnight_day(data_dir, "sofr", date, rate)
 }
 
 // ---------------------------------------------------------------------------
@@ -270,7 +240,11 @@ pub(crate) fn rows_to_curves(mut rows: Vec<TreasuryRow>) -> Vec<YieldCurveDay> {
             .insert(tenor_days, yield_bps as f64 / SCALE);
     }
     map.into_iter()
-        .map(|(date, points)| YieldCurve { date, points })
+        .map(|(date, points)| YieldCurve {
+            date,
+            yield_type: YieldType::Par,
+            points,
+        })
         .collect()
 }
 
@@ -286,7 +260,7 @@ pub fn read_treasury_year(path: &Path) -> Result<Vec<YieldCurveDay>> {
 
 /// Read all SOFR rates from one year's parquet file. Returns sorted vec.
 pub fn read_sofr_year(path: &Path) -> Result<Vec<SofrDay>> {
-    let mut rows = read_sofr_year_raw(path)?;
+    let mut rows = read_overnight_year_raw(path)?;
     rows.sort_by_key(|(d, _)| *d);
     Ok(rows
         .into_iter()
@@ -295,6 +269,127 @@ pub fn read_sofr_year(path: &Path) -> Result<Vec<SofrDay>> {
             rate: bps as f64 / SCALE,
         })
         .collect())
+}
+
+// ---------------------------------------------------------------------------
+// EFFR parquet I/O
+// ---------------------------------------------------------------------------
+
+/// Write (or overwrite) one year of EFFR rates to `{data_dir}/effr-{year}.parquet`.
+pub fn write_effr_year(data_dir: &Path, year: i32, rates: &[EffrDay]) -> Result<()> {
+    write_overnight_year(
+        data_dir,
+        "effr",
+        year,
+        rates.iter().map(|r| (r.date, r.rate)),
+    )
+}
+
+/// Append one day's EFFR rate to the appropriate year file.
+pub fn append_effr_day(data_dir: &Path, date: NaiveDate, rate: f64) -> Result<()> {
+    append_overnight_day(data_dir, "effr", date, rate)
+}
+
+/// Read all EFFR rates from one year's parquet file.
+pub fn read_effr_year(path: &Path) -> Result<Vec<EffrDay>> {
+    let mut rows = read_overnight_year_raw(path)?;
+    rows.sort_by_key(|(d, _)| *d);
+    Ok(rows
+        .into_iter()
+        .map(|(date, bps)| EffrDay {
+            date,
+            rate: bps as f64 / SCALE,
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// OBFR parquet I/O
+// ---------------------------------------------------------------------------
+
+/// Write (or overwrite) one year of OBFR rates to `{data_dir}/obfr-{year}.parquet`.
+pub fn write_obfr_year(data_dir: &Path, year: i32, rates: &[ObfrDay]) -> Result<()> {
+    write_overnight_year(
+        data_dir,
+        "obfr",
+        year,
+        rates.iter().map(|r| (r.date, r.rate)),
+    )
+}
+
+/// Append one day's OBFR rate to the appropriate year file.
+pub fn append_obfr_day(data_dir: &Path, date: NaiveDate, rate: f64) -> Result<()> {
+    append_overnight_day(data_dir, "obfr", date, rate)
+}
+
+/// Read all OBFR rates from one year's parquet file.
+pub fn read_obfr_year(path: &Path) -> Result<Vec<ObfrDay>> {
+    let mut rows = read_overnight_year_raw(path)?;
+    rows.sort_by_key(|(d, _)| *d);
+    Ok(rows
+        .into_iter()
+        .map(|(date, bps)| ObfrDay {
+            date,
+            rate: bps as f64 / SCALE,
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Generic overnight-rate parquet helpers (SOFR / EFFR / OBFR all share schema)
+// ---------------------------------------------------------------------------
+
+fn write_overnight_year<'a>(
+    data_dir: &Path,
+    prefix: &str,
+    year: i32,
+    rates: impl Iterator<Item = (NaiveDate, f64)> + 'a,
+) -> Result<()> {
+    let mut sorted: Vec<(NaiveDate, u32)> = rates
+        .map(|(d, r)| (d, (r * SCALE).round() as u32))
+        .collect();
+    sorted.sort_by_key(|(d, _)| *d);
+
+    let dates: Date32Array = sorted.iter().map(|(d, _)| Some(to_date32(*d))).collect();
+    let bps: UInt32Array = sorted.iter().map(|(_, b)| Some(*b)).collect();
+
+    let batch = RecordBatch::try_new(sofr_schema(), vec![Arc::new(dates), Arc::new(bps)])?;
+
+    let path = data_dir.join(format!("{prefix}-{year}.parquet"));
+    let file = fs::File::create(&path)?;
+    let mut writer = ArrowWriter::try_new(file, sofr_schema(), Some(writer_props()))?;
+    writer.write(&batch)?;
+    writer.close()?;
+
+    tracing::info!("wrote {} rows → {}", sorted.len(), path.display());
+    Ok(())
+}
+
+fn append_overnight_day(data_dir: &Path, prefix: &str, date: NaiveDate, rate: f64) -> Result<()> {
+    use chrono::Datelike;
+    let year = date.year();
+    let path = data_dir.join(format!("{prefix}-{year}.parquet"));
+
+    let mut existing = if path.exists() {
+        read_overnight_year_raw(&path)?
+    } else {
+        Vec::new()
+    };
+    existing.retain(|(d, _)| *d != date);
+    existing.push((date, (rate * SCALE).round() as u32));
+    existing.sort_by_key(|(d, _)| *d);
+
+    write_overnight_year(
+        data_dir,
+        prefix,
+        year,
+        existing.into_iter().map(|(d, b)| (d, b as f64 / SCALE)),
+    )
+}
+
+/// Generic raw reader for the (date, rate_bps) schema — shared by SOFR, EFFR, OBFR.
+fn read_overnight_year_raw(path: &Path) -> Result<Vec<SofrRow>> {
+    read_sofr_year_raw(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +405,7 @@ mod tests {
     fn make_curve(date: NaiveDate, points: &[(u32, f64)]) -> YieldCurve {
         YieldCurve {
             date,
+            yield_type: YieldType::Par,
             points: points.iter().copied().collect::<BTreeMap<_, _>>(),
         }
     }
