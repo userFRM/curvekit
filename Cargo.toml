@@ -7,9 +7,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
-authors = ["Theta Gamma Systems"]
+authors = ["userFRM"]
 license = "Apache-2.0"
 repository = "https://github.com/userFRM/curvekit"
 documentation = "https://docs.rs/curvekit"
@@ -41,6 +41,9 @@ async-trait = "0.1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 bytes = "1"
 futures = "0.3"
+
+# ── Crypto ──
+sha2 = "0.10"
 
 # ── Parquet / Arrow ──
 arrow = { version = "54", default-features = false, features = ["csv"] }

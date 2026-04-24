@@ -96,31 +96,68 @@ curvekit-cli append-today
 
 | Function | Returns |
 |---|---|
-| `treasury_today()` | `Result<YieldCurve>` — latest available curve |
-| `treasury_curve_for(date)` | `Result<YieldCurve>` |
+| `treasury_today()` | `Result<YieldCurve>` — latest par curve |
+| `treasury_curve_for(date)` | `Result<YieldCurve>` — par curve |
 | `treasury_rate_at(date, tenor)` | `Result<f64>` — interpolated cc rate |
 | `sofr_today()` | `Result<SofrDay>` — latest SOFR observation |
 
-### Client methods
+### Client methods — Treasury
 
 | Method | Returns |
 |---|---|
-| `treasury_curve(date)` | `Result<YieldCurve>` |
-| `treasury_range(start, end)` | `Result<Vec<YieldCurve>>` |
+| `treasury_par_curve(date)` | `Result<YieldCurve>` — par yields |
+| `treasury_zero_curve(date)` | `Result<YieldCurve>` — bootstrapped spot rates |
+| `treasury_range(start, end)` | `Result<Vec<YieldCurve>>` — par, chronological |
 | `treasury_rate(date, tenor)` | `Result<f64>` — interpolated cc rate |
+| `treasury_rate_with_convention(date, tenor, dc)` | `Result<f64>` — with ISDA day-count |
 | `treasury_latest()` | `Result<YieldCurve>` |
 | `treasury_earliest_date()` | `Result<NaiveDate>` |
+| `treasury_curve(date)` | `Result<YieldCurve>` — **deprecated** since 1.0.0; use `treasury_par_curve` |
+
+### Client methods — overnight rates
+
+| Method | Returns |
+|---|---|
 | `sofr(date)` | `Result<f64>` — cc overnight rate |
 | `sofr_range(start, end)` | `Result<Vec<SofrDay>>` |
 | `sofr_latest()` | `Result<SofrDay>` |
 | `sofr_earliest_date()` | `Result<NaiveDate>` |
-| `treasury_curve_blocking(date)` | `Result<YieldCurve>` — sync |
-| `treasury_range_blocking(start, end)` | `Result<Vec<YieldCurve>>` — sync |
-| `treasury_rate_blocking(date, tenor)` | `Result<f64>` — sync |
-| `treasury_latest_blocking()` | `Result<YieldCurve>` — sync |
-| `sofr_blocking(date)` | `Result<f64>` — sync |
-| `sofr_range_blocking(start, end)` | `Result<Vec<SofrDay>>` — sync |
-| `sofr_latest_blocking()` | `Result<SofrDay>` — sync |
+| `effr(date)` | `Result<f64>` — Effective Federal Funds Rate (cc) |
+| `effr_range(start, end)` | `Result<Vec<EffrDay>>` |
+| `effr_latest()` | `Result<EffrDay>` |
+| `effr_earliest_date()` | `Result<NaiveDate>` |
+| `obfr(date)` | `Result<f64>` — Overnight Bank Funding Rate (cc) |
+| `obfr_range(start, end)` | `Result<Vec<ObfrDay>>` |
+| `obfr_latest()` | `Result<ObfrDay>` |
+| `obfr_earliest_date()` | `Result<NaiveDate>` |
+
+### Client methods — blocking (sync)
+
+| Method | Returns |
+|---|---|
+| `treasury_curve_blocking(date)` | `Result<YieldCurve>` |
+| `treasury_range_blocking(start, end)` | `Result<Vec<YieldCurve>>` |
+| `treasury_rate_blocking(date, tenor)` | `Result<f64>` |
+| `treasury_latest_blocking()` | `Result<YieldCurve>` |
+| `sofr_blocking(date)` | `Result<f64>` |
+| `sofr_range_blocking(start, end)` | `Result<Vec<SofrDay>>` |
+| `sofr_latest_blocking()` | `Result<SofrDay>` |
+
+### Day-count conventions
+
+```rust
+use curvekit::{DayCount, Tenor};
+
+let r = client
+    .treasury_rate_with_convention("2024-01-15", Tenor::Y10, DayCount::Act360)
+    .await?;
+```
+
+Available conventions: `DayCount::Act360`, `DayCount::Act365Fixed`,
+`DayCount::Thirty360`, `DayCount::ActAct` (Act/Act ISDA).
+
+All rates are continuously compounded internally; `year_fraction` is applied
+when converting for a specific day-count basis.
 
 ### Date inputs
 
@@ -155,21 +192,39 @@ full method signatures, parameters, and error conditions.
 |---|---|---|
 | US Treasury Par Yield Curve | 2002 – present | ~15:30 ET, business days |
 | NY Fed SOFR | 2018-04-02 – present | ~08:00 ET, business days |
+| NY Fed EFFR | 1954 – present | ~08:00 ET, business days |
+| NY Fed OBFR | 2016-03-01 – present | ~08:00 ET, business days |
 
 Parquet files live in `data/` and are updated by two GitHub Actions workflows:
 
 - **nightly.yml** — cron `0 3 * * 1-5` (03:00 UTC, Mon–Fri): appends
-  yesterday's Treasury curve and latest SOFR to the current-year file.
-- **backfill.yml** — `workflow_dispatch`: full historical fetch (25 years).
+  yesterday's Treasury curve and latest SOFR/EFFR/OBFR to the current-year files.
+- **backfill.yml** — `workflow_dispatch`: full historical fetch (all sources).
+
+## v1.0 — stability guarantees
+
+- **Semver**: public API follows [Semantic Versioning](https://semver.org/).
+  Breaking changes require a major version bump. Deprecations are announced
+  one minor version before removal.
+- **MSRV**: Rust stable ≥ 1.75 (edition 2021). MSRV changes are a minor bump.
+- **Re-export policy**: every type and function re-exported from `curvekit::*`
+  is considered public API. Internal modules (`sources`, `fetcher`) are
+  `pub(crate)` and not covered.
+- **Error stability**: `curvekit::Error` variants are stable; adding new
+  variants is a minor bump, removing them is a major bump.
 
 ## Cache
 
 On first use, `Curvekit` downloads each year file from
 `raw.githubusercontent.com/userFRM/curvekit/main/data/` and writes it to
 `~/.cache/curvekit/` (XDG-compliant via the `directories` crate). Subsequent
-calls send `If-None-Match` with the stored ETag; a `304 Not Modified` skips
-re-download. On network failure the stale cached file is returned so existing
-workflows survive transient outages.
+calls check the SHA-256 digest listed in `data/manifest.json`; an unmodified
+cached file is returned immediately. On network failure the stale cached file
+is returned so existing workflows survive transient outages.
+
+Each file's SHA-256 digest is verified against `manifest.json` before being
+written to cache. A `ChecksumMismatch` error is returned if verification
+fails.
 
 **Env overrides:**
 
@@ -177,6 +232,7 @@ workflows survive transient outages.
 |---|---|
 | `CURVEKIT_BASE_URL` | Replace the GitHub raw origin |
 | `CURVEKIT_CACHE_DIR` | Override the cache directory |
+| `CURVEKIT_MIRROR_URL` | CDN fallback URL (default: jsDelivr) |
 
 See [`docs/architecture.md`](docs/architecture.md) for the full data-flow
 diagram and [`docs/data-sources.md`](docs/data-sources.md) for upstream URL
@@ -193,4 +249,4 @@ details.
 
 Apache-2.0 — see [`LICENSE`](LICENSE).
 
-Copyright 2026 Theta Gamma Systems
+Copyright 2026 userFRM
