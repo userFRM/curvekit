@@ -14,7 +14,7 @@ name = "curvekit-cli"
 path = "src/main.rs"
 
 [dependencies]
-curvekit = { path = "../crates/curvekit" }
+curvekit = { path = "../crates/curvekit", version = "1.0.0" }
 
 anyhow.workspace = true
 tokio.workspace = true
