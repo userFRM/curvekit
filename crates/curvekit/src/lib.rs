@@ -82,6 +82,7 @@
 pub mod client;
 pub mod curve;
 pub mod date;
+pub mod daycount;
 pub mod error;
 pub(crate) mod fetcher;
 pub mod interpolation;
@@ -91,9 +92,12 @@ pub mod tenor;
 // ── Top-level re-exports ──────────────────────────────────────────────────────
 
 pub use client::Curvekit;
-pub use curve::{SofrDay, SofrRate, TermStructure, YieldCurve, YieldCurveDay};
+pub use curve::{SofrDay, SofrRate, TermStructure, YieldCurve, YieldCurveDay, YieldType};
 pub use date::{Date, DateError, IntoDate};
+pub use daycount::DayCount;
 pub use error::{CurvekitError, Error, Result};
+pub use sources::effr::{EffrDay, EffrFetcher, HttpEffrFetcher};
+pub use sources::obfr::{HttpObfrFetcher, ObfrDay, ObfrFetcher};
 pub use sources::sofr::{parse_sofr_csv, HttpSofrFetcher, SofrFetcher};
 pub use sources::treasury::{parse_treasury_csv, HttpTreasuryFetcher, TreasuryFetcher};
 pub use tenor::Tenor;
@@ -147,7 +151,7 @@ pub async fn treasury_today() -> Result<YieldCurve> {
 /// }
 /// ```
 pub async fn treasury_curve_for(date: impl IntoDate) -> Result<YieldCurve> {
-    global_client().treasury_curve(date).await
+    global_client().treasury_par_curve(date).await
 }
 
 /// Interpolated Treasury rate at a specific tenor for a date (uses shared global client).
