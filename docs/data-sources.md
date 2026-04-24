@@ -9,14 +9,14 @@ curvekit pulls from two public, no-authentication-required endpoints.
 **URL pattern:**
 ```
 https://home.treasury.gov/resource-center/data-chart-center/interest-rates/
-  daily-treasury-rates.csv/all/all
+  daily-treasury-rates.csv/{YYYY}/all
   ?type=daily_treasury_yield_curve
   &field_tdr_date_value={YYYY}
   &page&_format=csv
 ```
 
 This returns all trading days for the requested year as a CSV.
-One HTTP request per calendar year that the requested date range spans.
+One HTTP request per calendar year.
 
 **Column format:** The response contains a `Date` column (MM/DD/YYYY) and
 12 maturity columns: `1 Mo`, `2 Mo`, `3 Mo`, `6 Mo`, `1 Yr`, `2 Yr`, `3 Yr`,
@@ -61,10 +61,16 @@ serves as the short-end anchor when `TermStructure::rate_for_days` is called.
 
 ## Refresh schedule summary
 
-| Source | Published | curvekit refresh window |
+| Source | Published | GitHub Actions update |
 |---|---|---|
-| Treasury yield curve | ~15:30 ET, business days | 15:30 ET ± 1 min |
-| SOFR | ~08:00 ET, business days | 08:00 ET ± 1 min |
+| Treasury yield curve | ~15:30 ET, business days | nightly.yml at 03:00 UTC (post-close) |
+| SOFR | ~08:00 ET, business days | nightly.yml at 03:00 UTC (next-day lag) |
 
-curvekit checks every 60 seconds. On weekends (Saturday, Sunday) the loop
-skips without fetching.
+Data is updated by `nightly.yml` (cron `0 3 * * 1-5`, Mon–Fri 03:00 UTC) which
+runs `curvekit-cli append-today`. There is no polling loop; the library simply
+fetches on demand.
+
+## Attribution
+
+All data is published by US federal agencies and is in the public domain.
+No license restrictions apply to downstream use.

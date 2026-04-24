@@ -173,7 +173,7 @@ fn latest_date_for(prefix: &str) -> Option<NaiveDate> {
 
 /// Return the full continuous yield curve as `HashMap<days, rate>`.
 ///
-/// Convenience wrapper over [`treasury_curve`] + [`YieldCurve::to_continuous_map`].
+/// Convenience wrapper over [`treasury_curve`] + [`crate::curve::YieldCurve::to_continuous_map`].
 pub fn treasury_continuous_map(date: NaiveDate) -> Result<HashMap<u32, f64>> {
     Ok(treasury_curve(date)?.to_continuous_map())
 }

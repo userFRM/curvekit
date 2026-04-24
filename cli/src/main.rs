@@ -35,7 +35,7 @@ use curvekit::TreasuryFetcher;
     propagate_version = true
 )]
 struct Cli {
-    /// Path to the data directory (default: <repo-root>/data/).
+    /// Path to the data directory (default: `<repo-root>/data/`).
     /// Override with $CURVEKIT_DATA_DIR or this flag.
     #[arg(long, env = "CURVEKIT_DATA_DIR", global = true)]
     data_dir: Option<PathBuf>,

@@ -1,12 +1,10 @@
-//! `curvekit` — risk-free rate library: Treasury yield curves + SOFR.
+//! `curvekit` — US Treasury yield curve and SOFR overnight rate for Rust.
 //!
-//! # Two usage modes
+//! Fetches parquet files on demand from GitHub raw, caches them locally with
+//! ETag revalidation, and falls back to stale cache on network errors. No API
+//! keys. Offline after the first successful fetch of each year file.
 //!
-//! ## 1. Async client (recommended for applications)
-//!
-//! [`Curvekit`] fetches parquet files from GitHub raw on demand, caches them
-//! locally with ETag revalidation, and falls back to stale cache on network
-//! errors.
+//! # Quick start
 //!
 //! ```no_run
 //! use curvekit::Curvekit;
@@ -15,32 +13,44 @@
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let client = Curvekit::new()?;
-//!     let curve = client.treasury_latest().await?;
-//!     let sofr  = client.sofr_latest().await?;
-//!     println!("{} — 10Y: {:.4}%  SOFR: {:.4}%",
-//!              curve.date,
-//!              curve.get(3650).unwrap_or(0.0) * 100.0,
-//!              sofr.rate * 100.0);
+//!
+//!     let curve = client
+//!         .treasury_curve(NaiveDate::from_ymd_opt(2020, 3, 20).unwrap())
+//!         .await?;
+//!     println!("10Y: {:.4}%", curve.get(3650).unwrap_or(0.0) * 100.0);
+//!
+//!     let sofr = client.sofr_latest().await?;
+//!     println!("SOFR {}: {:.4}%", sofr.date, sofr.rate * 100.0);
+//!
 //!     Ok(())
 //! }
 //! ```
 //!
-//! ## 2. Offline bundled reader (for CLI / data-pipeline tools)
+//! # Major types
 //!
-//! [`sources::bundled`] reads from local parquet files populated by
-//! `curvekit-cli backfill`. No network calls; returns
-//! `CurvekitError::DateNotFound` if the file is absent.
+//! - [`Curvekit`] — stateful client; create once, call many times.
+//! - [`YieldCurve`] — Treasury yield curve for a single date, keyed by days
+//!   to maturity. All rates are continuously compounded.
+//! - [`SofrDay`] — a single SOFR overnight observation.
+//! - [`TermStructure`] — combined Treasury + SOFR view for a date.
+//! - [`Tenor`] — typed constants for standard maturity labels (`Tenor::Y10`, etc.).
+//!
+//! # Environment overrides
+//!
+//! | Variable | Effect |
+//! |---|---|
+//! | `CURVEKIT_BASE_URL` | Replace the GitHub raw origin URL |
+//! | `CURVEKIT_CACHE_DIR` | Override `~/.cache/curvekit/` |
 //!
 //! # Modules
 //!
-//! - [`client`] — [`Curvekit`] async client with GitHub raw backend.
-//! - [`fetcher`] — ETag-aware [`CachedFetcher`] internals (pub(crate)).
-//! - [`curve`] — [`YieldCurve`], [`SofrRate`], [`TermStructure`], etc.
-//! - [`sources::bundled`] — offline parquet reader.
-//! - [`sources::parquet_io`] — parquet writer (used by CLI).
-//! - [`sources::treasury`] — US Treasury CSV fetcher (used by CLI).
+//! - [`client`] — [`Curvekit`] async client.
+//! - [`curve`] — [`YieldCurve`], [`SofrDay`], [`SofrRate`], [`TermStructure`], [`Tenor`].
+//! - [`sources::bundled`] — synchronous reader from local parquet (CLI `get`).
+//! - [`sources::parquet_io`] — parquet writer (CLI `backfill` / `append-today`).
+//! - [`sources::treasury`] — Treasury CSV fetcher (used by CLI).
 //! - [`sources::sofr`] — NY Fed SOFR CSV fetcher (used by CLI).
-//! - [`interpolation`] — linear interpolation.
+//! - [`interpolation`] — linear interpolation between tenor knots.
 //! - [`error`] — typed error enums.
 
 pub mod client;

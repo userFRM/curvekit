@@ -1,4 +1,4 @@
-//! Stateful `Curvekit` client — flat ThetaDataDx-style endpoint methods.
+//! Stateful `Curvekit` client — flat async endpoint methods.
 //!
 //! Fetches parquet files from GitHub raw (or a configurable origin) with an
 //! XDG-compliant local cache + ETag revalidation. Falls back to stale cache on
@@ -15,8 +15,8 @@
 //!     let client = Curvekit::new()?;
 //!     let curve = client.treasury_latest().await?;
 //!     println!("Latest treasury curve: {}", curve.date);
-//!     let rate = client.sofr_latest().await?;
-//!     println!("Latest SOFR: {:.4}%", rate.rate * 100.0);
+//!     let sofr = client.sofr_latest().await?;
+//!     println!("Latest SOFR: {:.4}%", sofr.rate * 100.0);
 //!     Ok(())
 //! }
 //! ```
@@ -32,8 +32,9 @@ use crate::sources::parquet_io::{read_sofr_year, read_treasury_year};
 
 /// Stateful curvekit client.
 ///
-/// Wraps an ETag-aware [`CachedFetcher`] and exposes flat endpoint methods
-/// named after what they return (ThetaDataDx pattern).
+/// Wraps an ETag-aware cached fetcher and exposes flat endpoint methods.
+/// Create once and reuse across calls; the internal reqwest client is kept
+/// alive for connection pooling.
 ///
 /// # Builder
 ///
@@ -53,7 +54,21 @@ pub struct Curvekit {
 impl Curvekit {
     /// Create a client with the default GitHub raw backend and XDG cache.
     ///
-    /// Env overrides: `CURVEKIT_BASE_URL`, `CURVEKIT_CACHE_DIR`.
+    /// Reads `CURVEKIT_BASE_URL` and `CURVEKIT_CACHE_DIR` from the environment
+    /// if set, otherwise uses the GitHub raw origin and `~/.cache/curvekit/`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying reqwest client cannot be constructed
+    /// (TLS init failure on unusual platforms; essentially never in practice).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use curvekit::Curvekit;
+    /// let client = Curvekit::new()?;
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
     pub fn new() -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent("curvekit/0.1 (+https://github.com/userFRM/curvekit)")
@@ -68,15 +83,35 @@ impl Curvekit {
         })
     }
 
-    /// Override the origin URL (default: `https://raw.githubusercontent.com/…`).
+    /// Override the origin URL.
     ///
+    /// Default: `https://raw.githubusercontent.com/userFRM/curvekit/main/data`.
     /// Useful for pointing at a fork or a self-hosted mirror.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use curvekit::Curvekit;
+    /// let client = Curvekit::new()?.with_base_url("https://my-mirror.example.com/curvekit");
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.fetcher.base_url = url.into();
         self
     }
 
     /// Override the on-disk cache directory.
+    ///
+    /// Default: `~/.cache/curvekit/` (XDG via the `directories` crate).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use curvekit::Curvekit;
+    /// use std::path::PathBuf;
+    /// let client = Curvekit::new()?.with_cache_dir(PathBuf::from("/tmp/curvekit-test"));
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
     pub fn with_cache_dir(mut self, dir: PathBuf) -> Self {
         self.fetcher.cache_dir = dir;
         self
@@ -84,10 +119,30 @@ impl Curvekit {
 
     // ── Treasury endpoints ────────────────────────────────────────────────────
 
-    /// Fetch the full Treasury yield curve for a single date.
+    /// Fetch the full US Treasury Par Yield Curve for a single date.
     ///
-    /// Resolves the date to a year file (`treasury-{year}.parquet`), fetches +
-    /// caches it, then filters to the requested date.
+    /// Resolves the date to a year file (`treasury-{year}.parquet`), fetches
+    /// and caches it (ETag revalidation), then filters to the requested date.
+    ///
+    /// # Errors
+    ///
+    /// - Network failure with no cached file for the year.
+    /// - `date` is not present in the year file (weekend, holiday, or outside
+    ///   coverage 2002–present).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use curvekit::Curvekit;
+    /// # use chrono::NaiveDate;
+    /// # async fn run() -> anyhow::Result<()> {
+    /// let client = Curvekit::new()?;
+    /// let curve = client
+    ///     .treasury_curve(NaiveDate::from_ymd_opt(2020, 3, 20).unwrap())
+    ///     .await?;
+    /// println!("10Y: {:.4}%", curve.get(3650).unwrap_or(0.0) * 100.0);
+    /// # Ok(()) }
+    /// ```
     pub async fn treasury_curve(&self, date: NaiveDate) -> Result<YieldCurve> {
         let year = date.year();
         let curves = self.treasury_year(year).await?;
@@ -97,10 +152,32 @@ impl Curvekit {
             .ok_or_else(|| anyhow!("no treasury curve for {date}"))
     }
 
-    /// Fetch all Treasury curves in `[start, end]` (inclusive).
+    /// Fetch all Treasury yield curves in `[start, end]` (inclusive).
     ///
-    /// Determines the year span, fetches each year file in parallel, concatenates
-    /// and filters to the requested range.
+    /// Determines the year span, fetches each year file in parallel, then
+    /// filters to the requested date range. Non-trading days are absent.
+    ///
+    /// # Errors
+    ///
+    /// - `start > end`.
+    /// - Network failure for any year in the span with no cached file.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use curvekit::Curvekit;
+    /// # use chrono::NaiveDate;
+    /// # async fn run() -> anyhow::Result<()> {
+    /// let client = Curvekit::new()?;
+    /// let curves = client
+    ///     .treasury_range(
+    ///         NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+    ///         NaiveDate::from_ymd_opt(2020, 12, 31).unwrap(),
+    ///     )
+    ///     .await?;
+    /// println!("Trading days in 2020: {}", curves.len());
+    /// # Ok(()) }
+    /// ```
     pub async fn treasury_range(
         &self,
         start: NaiveDate,
@@ -125,6 +202,29 @@ impl Curvekit {
     }
 
     /// Interpolated continuously-compounded rate at `days` to maturity for `date`.
+    ///
+    /// Calls [`treasury_curve`][Self::treasury_curve] internally and applies
+    /// linear interpolation via [`YieldCurve::get`]. Extrapolates flat at
+    /// the shortest and longest available tenors.
+    ///
+    /// # Errors
+    ///
+    /// - Same as [`treasury_curve`][Self::treasury_curve].
+    /// - The curve for `date` is empty (all tenors absent).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use curvekit::Curvekit;
+    /// # use chrono::NaiveDate;
+    /// # async fn run() -> anyhow::Result<()> {
+    /// let client = Curvekit::new()?;
+    /// let r = client
+    ///     .treasury_rate(NaiveDate::from_ymd_opt(2026, 4, 14).unwrap(), 45)
+    ///     .await?;
+    /// println!("45d rate: {r:.6}");
+    /// # Ok(()) }
+    /// ```
     pub async fn treasury_rate(&self, date: NaiveDate, days: u32) -> Result<f64> {
         let curve = self.treasury_curve(date).await?;
         curve
@@ -132,10 +232,26 @@ impl Curvekit {
             .ok_or_else(|| anyhow!("no treasury data for {date} at {days}d"))
     }
 
-    /// Latest available Treasury yield curve across all cached/remote year files.
+    /// Latest available Treasury yield curve.
     ///
-    /// Fetches the current year; if no data is present yet (e.g. early in a new
-    /// year before the first trading day), falls back to the previous year.
+    /// Fetches the current calendar year; falls back to the previous year if
+    /// no data is present yet (e.g. early January before the first trading day).
+    ///
+    /// # Errors
+    ///
+    /// - Network failure with no cached files for both the current and previous
+    ///   year.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use curvekit::Curvekit;
+    /// # async fn run() -> anyhow::Result<()> {
+    /// let client = Curvekit::new()?;
+    /// let curve = client.treasury_latest().await?;
+    /// println!("Latest: {}", curve.date);
+    /// # Ok(()) }
+    /// ```
     pub async fn treasury_latest(&self) -> Result<YieldCurve> {
         use chrono::Utc;
         let current_year = Utc::now().year();
@@ -149,7 +265,25 @@ impl Curvekit {
         Err(anyhow!("no treasury data available"))
     }
 
-    /// Earliest date for which treasury data is available remotely.
+    /// Earliest date for which Treasury data is available remotely.
+    ///
+    /// Fetches `treasury-2000.parquet` and returns the minimum date found.
+    /// Coverage in practice starts 2002-01-02.
+    ///
+    /// # Errors
+    ///
+    /// - Network failure with no cached file for year 2000.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use curvekit::Curvekit;
+    /// # async fn run() -> anyhow::Result<()> {
+    /// let client = Curvekit::new()?;
+    /// let d = client.treasury_earliest_date().await?;
+    /// println!("Earliest treasury: {d}");
+    /// # Ok(()) }
+    /// ```
     pub async fn treasury_earliest_date(&self) -> Result<NaiveDate> {
         // The repo starts from 2000; fetch that year and return the first date.
         let curves = self.treasury_year(2000).await?;
@@ -162,7 +296,25 @@ impl Curvekit {
 
     // ── SOFR endpoints ────────────────────────────────────────────────────────
 
-    /// Fetch the SOFR overnight rate for a single date.
+    /// Fetch the SOFR overnight rate (continuously compounded) for a single date.
+    ///
+    /// # Errors
+    ///
+    /// - Network failure with no cached file for the year.
+    /// - `date` not found in the year file (weekend, holiday, or before
+    ///   SOFR inception 2018-04-02).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use curvekit::Curvekit;
+    /// # use chrono::NaiveDate;
+    /// # async fn run() -> anyhow::Result<()> {
+    /// let client = Curvekit::new()?;
+    /// let r = client.sofr(NaiveDate::from_ymd_opt(2026, 4, 14).unwrap()).await?;
+    /// println!("SOFR: {r:.6}");
+    /// # Ok(()) }
+    /// ```
     pub async fn sofr(&self, date: NaiveDate) -> Result<f64> {
         let year = date.year();
         let rates = self.sofr_year(year).await?;
@@ -174,6 +326,31 @@ impl Curvekit {
     }
 
     /// Fetch all SOFR observations in `[start, end]` (inclusive).
+    ///
+    /// Fetches each calendar year in the span in parallel. Non-business days
+    /// are absent from the result.
+    ///
+    /// # Errors
+    ///
+    /// - `start > end`.
+    /// - Network failure for any year in the span with no cached file.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use curvekit::Curvekit;
+    /// # use chrono::NaiveDate;
+    /// # async fn run() -> anyhow::Result<()> {
+    /// let client = Curvekit::new()?;
+    /// let rates = client
+    ///     .sofr_range(
+    ///         NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+    ///         NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
+    ///     )
+    ///     .await?;
+    /// println!("SOFR observations in 2023: {}", rates.len());
+    /// # Ok(()) }
+    /// ```
     pub async fn sofr_range(&self, start: NaiveDate, end: NaiveDate) -> Result<Vec<SofrDay>> {
         if start > end {
             return Err(anyhow!("sofr_range: start {start} > end {end}"));
@@ -191,6 +368,25 @@ impl Curvekit {
     }
 
     /// Latest available SOFR observation.
+    ///
+    /// Fetches the current calendar year; falls back to the previous year if
+    /// no data is present yet.
+    ///
+    /// # Errors
+    ///
+    /// - Network failure with no cached files for both the current and previous
+    ///   year.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use curvekit::Curvekit;
+    /// # async fn run() -> anyhow::Result<()> {
+    /// let client = Curvekit::new()?;
+    /// let sofr = client.sofr_latest().await?;
+    /// println!("SOFR {}: {:.4}%", sofr.date, sofr.rate * 100.0);
+    /// # Ok(()) }
+    /// ```
     pub async fn sofr_latest(&self) -> Result<SofrDay> {
         use chrono::Utc;
         let current_year = Utc::now().year();
@@ -206,7 +402,23 @@ impl Curvekit {
 
     /// Earliest date for which SOFR data is available remotely.
     ///
-    /// SOFR began 2018-04-02.
+    /// SOFR began 2018-04-02. Fetches `sofr-2018.parquet` and returns the
+    /// minimum date found.
+    ///
+    /// # Errors
+    ///
+    /// - Network failure with no cached file for year 2018.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use curvekit::Curvekit;
+    /// # async fn run() -> anyhow::Result<()> {
+    /// let client = Curvekit::new()?;
+    /// let d = client.sofr_earliest_date().await?;
+    /// println!("SOFR inception: {d}");
+    /// # Ok(()) }
+    /// ```
     pub async fn sofr_earliest_date(&self) -> Result<NaiveDate> {
         let rates = self.sofr_year(2018).await?;
         rates

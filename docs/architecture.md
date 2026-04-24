@@ -1,92 +1,132 @@
 # Architecture
 
-## Design: offline-first bundled parquet
-
-curvekit ships with historical rate data baked into the repository as compressed
-parquet files under `data/`. Consumers link against the `curvekit` crate and call
-synchronous functions — no daemon, no HTTP, no runtime required.
+## Data flow
 
 ```
-data/
-├── treasury-{year}.parquet   (Date32, tenor_days UInt32, yield_bps UInt32)
-├── ...
-├── sofr-{year}.parquet       (Date32, rate_bps UInt32)
-└── ...
-
-          ┌──────────────────────────────────────┐
-          │  curvekit (lib)                      │
-          │  sources::bundled   ← read at call   │
-          │  sources::parquet_io← write (CLI)    │
-          │  sources::treasury  ← HTTP fetch     │
-          │  sources::sofr      ← HTTP fetch     │
-          │  curve / interpolation / error       │
-          └──────────────────────────────────────┘
-                   ▲ git dep / path dep
-           consumer crates (e.g. kairos-engine)
+┌──────────────┐      ┌────────────────────────────┐
+│  Data source │      │   GitHub Actions (runner)  │
+│ treasury.gov │──────│  backfill.yml (manual)     │
+│   NY Fed     │      │  nightly.yml (cron weekday │
+└──────────────┘      │                03:00 UTC)  │
+                      └──────────┬─────────────────┘
+                                 │ commit data/*.parquet
+                                 ▼
+                 ┌───────────────────────────┐
+                 │  userFRM/curvekit repo    │
+                 │  data/treasury-YYYY.parquet│
+                 │  data/sofr-YYYY.parquet    │
+                 └───────────┬───────────────┘
+                             │ raw.githubusercontent.com/.../data/
+                             ▼
+┌──────────────────────────────────────────────────┐
+│  curvekit::Curvekit (client lib)                 │
+│   fetch → ETag check → parquet parse            │
+│   cache: ~/.cache/curvekit/                     │
+└──────────────────────────────────────────────────┘
+                             ▲
+                             │ flat async API
+         ┌───────────────────┴──────────────────┐
+         │  user app (e.g. Kairos)              │
+         │  client.treasury_curve(date).await?  │
+         └──────────────────────────────────────┘
 ```
 
 ## Crates
 
 ### curvekit (lib)
 
-The single library crate. Depends on:
-- `arrow` + `parquet` for parquet I/O
-- `reqwest` for HTTP fetching (CLI / backfill only path)
-- `async-trait` for `TreasuryFetcher` / `SofrFetcher` traits
-- `chrono` for dates
-- `thiserror` for typed errors
+Single library crate. Contains:
+
+- `client` — `Curvekit` struct with flat async endpoint methods.
+- `fetcher` — `CachedFetcher`: ETag-aware HTTP fetch + disk cache.
+- `curve` — `YieldCurve`, `SofrDay`, `SofrRate`, `TermStructure`, `Tenor`.
+- `sources::bundled` — synchronous reader from local parquet (used by CLI `get`).
+- `sources::parquet_io` — parquet writer (used by CLI `backfill` / `append-today`).
+- `sources::treasury` — Treasury CSV fetcher (used by CLI only).
+- `sources::sofr` — NY Fed SOFR CSV fetcher (used by CLI only).
+- `interpolation` — linear interpolation between tenor knots.
+- `error` — typed error enums.
 
 ### curvekit-cli (binary)
 
-The CLI binary. All network I/O lives here — the library API (`bundled.rs`) is
-fully synchronous and disk-only.
+All network I/O for data ingestion lives here. Consumes the `curvekit` lib.
+
+## Cache semantics
+
+Cache directory: `~/.cache/curvekit/` (XDG via the `directories` crate).
+Override: `$CURVEKIT_CACHE_DIR`.
+
+```
+~/.cache/curvekit/
+├── treasury-2024.parquet
+├── treasury-2024.parquet.etag
+├── sofr-2024.parquet
+└── sofr-2024.parquet.etag
+```
+
+On each `Curvekit` method call the internal `CachedFetcher::fetch` runs this
+logic for the relevant year file:
+
+1. If the file is cached and an ETag is stored, send `If-None-Match`.
+2. `304 Not Modified` → return cached bytes, no download.
+3. `2xx` → write new body + new ETag, return bytes.
+4. Non-2xx (and not 304) → return error.
+5. Network error + cache present → log warning, return stale cache.
+6. Network error + no cache → return error.
+
+**Stale fallback** means existing workflows survive transient outages or
+offline operation after the cache is warm.
+
+**Base URL override:** `$CURVEKIT_BASE_URL` replaces
+`https://raw.githubusercontent.com/userFRM/curvekit/main/data` — useful for
+pointing at a fork or a self-hosted mirror.
 
 ## Data format
 
-### Treasury
+### Treasury parquet schema
 
-Long format: one row per (date, tenor). 12 tenors × ~250 trading days/year =
-~3 000 rows/year.
+Long format: one row per (date, tenor). 12 tenors × ~250 trading days/year ≈
+3 000 rows/year.
 
-| column      | type    | description                                  |
-|-------------|---------|----------------------------------------------|
-| date        | Date32  | days since Unix epoch (1970-01-01)           |
-| tenor_days  | UInt32  | days to maturity (30/60/91/182/365/730/…)    |
-| yield_bps   | UInt32  | continuously-compounded rate × 10 000        |
+| Column | Arrow type | Description |
+|---|---|---|
+| `date` | `Date32` | Days since Unix epoch (1970-01-01) |
+| `tenor_days` | `UInt32` | Days to maturity (30/60/91/182/365/730/…) |
+| `yield_bps` | `UInt32` | Continuously-compounded rate × 10 000 |
 
-### SOFR
+### SOFR parquet schema
 
-| column   | type    | description                              |
-|----------|---------|------------------------------------------|
-| date     | Date32  | days since Unix epoch                    |
-| rate_bps | UInt32  | continuously-compounded rate × 10 000   |
+| Column | Arrow type | Description |
+|---|---|---|
+| `date` | `Date32` | Days since Unix epoch |
+| `rate_bps` | `UInt32` | Continuously-compounded rate × 10 000 |
 
-Rates are stored as basis-point integers to avoid floating-point drift.
+Rates are stored as integer basis-point counts to avoid floating-point drift.
 
-## Data directory resolution
+## Rate conversion
 
-At runtime the reader looks for `data/` in order:
+Treasury publishes Bond Equivalent Yields (BEY, semi-annual). curvekit
+converts on ingest to continuously compounded:
 
-1. `$CURVEKIT_DATA_DIR` env var (absolute path override).
-2. `CARGO_MANIFEST_DIR/../../data/` — the compile-time path relative to
-   `crates/curvekit/`. Works for `cargo test`, git deps, and `cargo install --path`.
+```
+BEY  = column_value / 100
+APY  = (1 + BEY / 2)^2 − 1
+r_cc = ln(1 + APY)
+```
+
+SOFR is published as a percentage; conversion: `r_cc = ln(1 + rate_pct / 100)`.
 
 ## Refresh schedule
 
-Data is updated by two GitHub Actions workflows:
-
 | Workflow | Trigger | Action |
 |---|---|---|
-| `nightly.yml` | `0 3 * * 1-5` (03:00 UTC weekdays) | `append-today` — yesterday's Treasury + latest SOFR |
-| `backfill.yml` | `workflow_dispatch` | `backfill --years 25` — full historical fetch |
+| `nightly.yml` | `0 3 * * 1-5` (03:00 UTC, Mon–Fri) | `append-today` — yesterday's Treasury + latest SOFR |
+| `backfill.yml` | `workflow_dispatch` (manual) | `backfill` — full historical fetch (25 years) |
 
 ## Interpolation
 
-Two methods in `curvekit::interpolation`:
-
-- `linear` — piecewise linear between bracketing points; flat extrapolation at
-  boundaries. O(log n) via `BTreeMap::range`.
-- `cubic_spline` — Fritsch-Carlson monotone cubic (no oscillation), falls back
-  to `linear` for < 3 points.
-
-`YieldCurve::get(days)` uses `linear` by default.
+`YieldCurve::get(days)` uses piecewise linear interpolation between bracketing
+tenor knots via `curvekit::interpolation::linear`. The function does flat
+extrapolation at the boundaries (clamps to the shortest/longest available
+tenor). `TermStructure::rate_for_days` inserts SOFR at the 1-day point before
+interpolating, providing a short-end anchor.

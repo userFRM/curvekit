@@ -1,133 +1,117 @@
 # curvekit
 
-**Risk-free rate service for Rust** — fetches, caches, interpolates, and
-serves the US Treasury yield curve and SOFR overnight rate via JSON-RPC 2.0
-and REST.
+Risk-free rate service for Rust — US Treasury yield curve + SOFR overnight
+rate, served from bundled parquet with runtime GitHub fetch and local cache.
+No API keys. Offline after first query.
 
-No API keys. No paid data subscriptions. Just the public endpoints that
-treasury.gov and the NY Fed have provided for decades, wrapped in a
-production-ready Rust service.
+## Install
 
-## Why
+```toml
+# Cargo.toml
+[dependencies]
+curvekit = { git = "https://github.com/userFRM/curvekit" }
+```
 
-The Rust ecosystem has excellent fixed-income math libraries, but none that
-handle the operational layer: scheduled fetching from public sources, local
-caching, and a typed client SDK. Every team that needs a risk-free rate ends
-up copy-pasting the same treasury.gov CSV parser. curvekit does it once,
-correctly, with tests.
+Once published to crates.io: `cargo add curvekit`
 
 ## Quick start
 
+```rust
+use curvekit::Curvekit;
+use chrono::NaiveDate;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let client = Curvekit::new()?;
+
+    // Full Treasury yield curve for a date
+    let curve = client.treasury_curve(NaiveDate::from_ymd_opt(2020, 3, 20).unwrap()).await?;
+    println!("2020-03-20 10Y: {:.4}", curve.get(3650).unwrap_or(0.0));
+
+    // Interpolated rate at an arbitrary tenor
+    let r_30d = client.treasury_rate(NaiveDate::from_ymd_opt(2026, 4, 14).unwrap(), 30).await?;
+    println!("30d interp: {r_30d:.4}");
+
+    // Latest SOFR observation
+    let sofr = client.sofr_latest().await?;
+    println!("SOFR {}: {:.4}%", sofr.date, sofr.rate * 100.0);
+
+    Ok(())
+}
+```
+
+## CLI
+
 ```bash
-# Install and start the server
-cargo install curvekit-server
-curvekit-server --port 8080 --db ./curvekit.db
+# Print Treasury curve for a date
+curvekit-cli get treasury --date 2026-04-14
 
-# Query via curl
-curl http://localhost:8080/treasury/curve/2026-04-15 | jq
-curl http://localhost:8080/sofr/2026-04-15           | jq
-curl http://localhost:8080/health                    | jq
+# Print SOFR rate for a date
+curvekit-cli get sofr --date 2026-04-14
 
-# Or via JSON-RPC
-curl -s http://localhost:8080/rpc \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"rates.treasury_curve","params":{"date":"2026-04-15"}}' \
-  | jq
+# Backfill full history (run once or via CI)
+curvekit-cli backfill
+
+# Append yesterday's data (used by nightly CI)
+curvekit-cli append-today
 ```
 
-## Architecture
+## API surface
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                   curvekit-server (binary)                   │
-│                                                              │
-│  ┌─────────────┐    ┌──────────────────────────────────────┐ │
-│  │  scheduler  │    │           axum HTTP server           │ │
-│  │ 08:00 SOFR  │    │  POST /rpc  ·  GET /treasury/...     │ │
-│  │ 15:30 Tsy   │    │  GET /sofr/...  ·  GET /health       │ │
-│  └──────┬──────┘    └───────────────────┬──────────────────┘ │
-│         │                               │                    │
-│  ┌──────▼───────────────────────────────▼──────────────────┐ │
-│  │                   curvekit-rpc                           │ │
-│  │         JSON-RPC dispatch · REST handlers               │ │
-│  └──────────────────────────┬───────────────────────────────┘ │
-│                             │                                │
-│  ┌──────────────────────────▼───────────────────────────────┐ │
-│  │                  curvekit-core                           │ │
-│  │  sources/treasury ── sources/sofr   interpolation        │ │
-│  │  YieldCurve · SofrRate · TermStructure                   │ │
-│  │                    SQLite cache                          │ │
-│  └──────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────┘
-                              ▲
-          ┌───────────────────┤
-          │                   │
-  curvekit-sdk (Rust)    curvekit CLI
-  CurvekitClient         get · refresh · health
-```
+| Method | Returns |
+|---|---|
+| `treasury_curve(date)` | `Result<YieldCurve>` |
+| `treasury_range(start, end)` | `Result<Vec<YieldCurve>>` |
+| `treasury_rate(date, days)` | `Result<f64>` — interpolated cc rate |
+| `treasury_latest()` | `Result<YieldCurve>` |
+| `treasury_earliest_date()` | `Result<NaiveDate>` |
+| `sofr(date)` | `Result<f64>` — cc overnight rate |
+| `sofr_range(start, end)` | `Result<Vec<SofrDay>>` |
+| `sofr_latest()` | `Result<SofrDay>` |
+| `sofr_earliest_date()` | `Result<NaiveDate>` |
+
+All rates are continuously compounded. See [`docs/api.md`](docs/api.md) for
+full method signatures, parameters, and error conditions.
+
+## Data
+
+| Source | Coverage | Published |
+|---|---|---|
+| US Treasury Par Yield Curve | 2002 – present | ~15:30 ET, business days |
+| NY Fed SOFR | 2018-04-02 – present | ~08:00 ET, business days |
+
+Parquet files live in `data/` and are updated by two GitHub Actions workflows:
+
+- **nightly.yml** — cron `0 3 * * 1-5` (03:00 UTC, Mon–Fri): appends
+  yesterday's Treasury curve and latest SOFR to the current-year file.
+- **backfill.yml** — `workflow_dispatch`: full historical fetch (25 years).
+
+## Cache
+
+On first use, `Curvekit` downloads each year file from
+`raw.githubusercontent.com/userFRM/curvekit/main/data/` and writes it to
+`~/.cache/curvekit/` (XDG-compliant via the `directories` crate). Subsequent
+calls send `If-None-Match` with the stored ETag; a `304 Not Modified` skips
+re-download. On network failure the stale cached file is returned so existing
+workflows survive transient outages.
+
+**Env overrides:**
+
+| Variable | Effect |
+|---|---|
+| `CURVEKIT_BASE_URL` | Replace the GitHub raw origin |
+| `CURVEKIT_CACHE_DIR` | Override the cache directory |
+
+See [`docs/architecture.md`](docs/architecture.md) for the full data-flow
+diagram and [`docs/data-sources.md`](docs/data-sources.md) for upstream URL
+details.
 
 ## Crates
 
 | Crate | Description |
 |---|---|
-| `curvekit-core` | Fetchers, parsers, curve types, interpolation, SQLite cache |
-| `curvekit-rpc` | JSON-RPC 2.0 and REST handlers (axum) |
-| `curvekit-server` | Binary — serves the API |
-| `curvekit-sdk` | Rust HTTP client wrapping the server |
-| `curvekit` (CLI) | Command-line interface |
-
-## Data sources
-
-| Source | URL | Refresh |
-|---|---|---|
-| US Treasury | `home.treasury.gov` daily CSV | 15:30 ET, business days |
-| SOFR | `markets.newyorkfed.org` API | 08:00 ET, business days |
-
-See [`docs/data-sources.md`](docs/data-sources.md) for details.
-
-## Rust SDK
-
-```rust
-use curvekit_sdk::CurvekitClient;
-use chrono::NaiveDate;
-
-let client = CurvekitClient::new("http://localhost:8080");
-let date   = NaiveDate::from_ymd_opt(2026, 4, 15).unwrap();
-
-// Full yield curve
-let curve = client.treasury_curve(date).await?;
-
-// SOFR overnight rate (continuously compounded)
-let sofr = client.sofr(date).await?;
-
-// Interpolated risk-free rate for any DTE
-let r_45d = client.rate_for_days(date, 45).await?;
-```
-
-## JSON-RPC methods
-
-| Method | Params | Returns |
-|---|---|---|
-| `rates.treasury_curve` | `{"date": "YYYY-MM-DD"}` | `YieldCurve` |
-| `rates.sofr` | `{"date": "YYYY-MM-DD"}` | `SofrRate` |
-| `rates.treasury_range` | `{"start": "...", "end": "..."}` | `[YieldCurve]` |
-| `rates.health` | `{}` | row counts + status |
-
-OpenAPI spec: `GET /openapi.json`.
-
-## Yield curve representation
-
-All rates are **continuously compounded**, converted from the Treasury's
-published Bond Equivalent Yields:
-
-```
-BEY → APY:  APY  = (1 + BEY/200)^2 − 1
-APY → cont: r    = ln(1 + APY)
-```
-
-Curve points are keyed by **days to maturity** using these approximations:
-`1M=30, 2M=60, 3M=91, 6M=182, 1Y=365, 2Y=730, 3Y=1095, 5Y=1825,
-7Y=2555, 10Y=3650, 20Y=7300, 30Y=10950`.
+| `curvekit` | Library — fetcher, cache, types, interpolation |
+| `curvekit-cli` | Binary — backfill, append-today, get |
 
 ## License
 

@@ -11,8 +11,8 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-Rust stable (1.77+) is required. `rusqlite` uses a bundled SQLite, so no
-system SQLite package is needed.
+Rust stable (1.77+) is required. No system libraries are needed — all
+dependencies are pure Rust or bundled.
 
 ## Before submitting a PR
 
@@ -24,8 +24,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-All three must pass. Live-network tests (fetching from treasury.gov / NY Fed)
-are gated behind `#[ignore]` and are not required for CI.
+All three must pass. Live-network tests (fetching from treasury.gov / NY Fed
+/ GitHub raw) are gated behind `#[ignore]` and are not required for CI.
 
 ## Pull request conventions
 
@@ -38,6 +38,10 @@ are gated behind `#[ignore]` and are not required for CI.
 
 If you change the Treasury or SOFR source URL or CSV schema, update
 `docs/data-sources.md` to match and add a fixture CSV to `tests/fixtures/`.
+
+If you change the parquet schema (`data/*.parquet`), update
+`docs/architecture.md` and the schema tables in `crates/curvekit/src/`
+accordingly.
 
 ## License
 
