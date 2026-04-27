@@ -1,8 +1,10 @@
 name: nightly
 on:
   schedule:
-    # 03:00 UTC Mon-Fri = 11pm/10pm ET (post-close, after Treasury ~15:30 ET + SOFR ~08:00 ET next day)
-    - cron: "0 3 * * 1-5"
+    # 22:00 UTC Mon-Fri = 18:00 ET (EDT) / 17:00 ET (EST).
+    # AFTER both Treasury (~15:30 ET) and SOFR (~08:00 ET) publish for the day.
+    # Previous schedule "0 3 * * 1-5" fired BEFORE the day's data — bug.
+    - cron: "0 22 * * 1-5"
   workflow_dispatch:
 
 jobs:
@@ -11,6 +13,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+    env:
+      RUST_LOG: info
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -18,6 +22,8 @@ jobs:
         run: cargo build --release --bin curvekit-cli
       - name: Append today
         run: ./target/release/curvekit-cli append-today
+      - name: Show data status
+        run: ls -la data/ | head -20
       - name: Commit if changed
         run: |
           git config user.email "actions@github.com"
@@ -26,4 +32,6 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "chore(data): nightly $(date -u +%Y-%m-%d)"
             git push
+          else
+            echo "no changes to commit"
           fi
